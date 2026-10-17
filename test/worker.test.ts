@@ -135,8 +135,8 @@ test("N2/N3: a list of removed extensions counts as checked, is cached, and cann
   const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
   try {
     await mod.default.scheduled({}, env as never);
-    assert.ok(downloads <= 120, `budget is a hard limit, got ${downloads}`);
-    for (let r = 0; r < 3; r++) await mod.default.scheduled({}, env as never);
+    assert.ok(downloads <= 40, `budget is a hard limit, got ${downloads}`);
+    for (let r = 0; r < 6; r++) await mod.default.scheduled({}, env as never);
   } finally { globalThis.fetch = real; }
   assert.notEqual(JSON.parse(store.get("wl:" + customer)!.v).lastCheck, "2026-01-02T00:00:00Z", "the customer list was checked");
   assert.notEqual(JSON.parse(store.get("wl:" + "0".repeat(43))!.v).lastCheck, old, "a list of removed extensions counts as checked");

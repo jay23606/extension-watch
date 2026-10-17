@@ -9,5 +9,5 @@
   "triggers": { "crons": ["*/10 * * * *"] },
   "workers_dev": true,
   "observability": { "enabled": false },
-  "limits": { "cpu_ms": 3000 }
+  "limits": { "cpu_ms": 10000 }
 }

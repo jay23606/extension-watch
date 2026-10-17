@@ -11,8 +11,8 @@ interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS
 const MAX_SCAN = 25;
 const NOT_LISTED = "Not on the Chrome Web Store";
 const DAY_MS = 86_400_000;
-/** One cron run (every 10 minutes) downloads at most this many packages: about 17,000 a day. */
-const FETCH_BUDGET = 120;
+/** One cron run (every 10 minutes) downloads at most this many packages: about 5,700 a day, a few seconds of CPU per run. */
+const FETCH_BUDGET = 40;
 /** One run touches at most this many lists, which keeps KV operations per invocation under Cloudflare's 1,000 limit. */
 const MAX_LISTS_PER_RUN = 150;
 
