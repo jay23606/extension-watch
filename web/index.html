@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Extension Watch reviews the Chrome extensions your team uses, scores their risk, and alerts you when an update silently adds permissions." />
+  <meta name="theme-color" content="#0a0d14" />
+  <title>Extension Watch — know what your Chrome extensions can do</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" data-nav="landing">Extension Watch</a>
+    <nav class="nav" aria-label="Primary">
+      <button type="button" class="nav__link" data-nav="landing">Product</button>
+      <button type="button" class="nav__link" data-nav="methodology">Methodology</button>
+      <button type="button" class="nav__link" data-nav="workspace">Workspace</button>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <!-- Landing -->
+    <section id="view-landing" class="view">
+      <div class="hero">
+        <p class="eyebrow">Browser extension risk, monitored</p>
+        <h1 class="hero__title">Your team's Chrome extensions, reviewed before they turn against you.</h1>
+        <p class="hero__sub">An extension that was harmless when installed can gain "read all your data on all websites" in a silent update. Extension Watch downloads each package, reads its manifest, scores the risk, and alerts you the moment that changes.</p>
+      </div>
+
+      <section class="try" aria-labelledby="try-heading">
+        <div class="card">
+          <h2 class="card__title" id="try-heading">Try it</h2>
+          <p class="card__hint">Paste extension IDs or Chrome Web Store URLs, one per line.</p>
+          <form id="tryForm" class="try__form" autocomplete="off">
+            <label class="sr-only" for="tryInput">Extension IDs or Web Store URLs</label>
+            <textarea id="tryInput" class="try__input" rows="6" spellcheck="false"
+              placeholder="aapbdbdomjkkjkaonfhkkikfgjllcleb&#10;https://chromewebstore.google.com/detail/google-translate/aapbdbdomjkkjkaonfhkkikfgjllcleb"></textarea>
+            <div class="try__actions">
+              <button type="submit" class="btn btn--primary">Scan extensions</button>
+              <span class="try__note">Reads only public Web Store packages.</span>
+            </div>
+          </form>
+          <p id="tryStatus" class="status" role="status" aria-live="polite" hidden></p>
+        </div>
+      </section>
+
+      <section class="pricing" aria-labelledby="pricing-heading">
+        <h2 class="section-title" id="pricing-heading">Pricing</h2>
+        <div class="pricing__grid">
+          <article class="plan">
+            <h3 class="plan__name">Free</h3>
+            <p class="plan__price">$0</p>
+            <ul class="plan__features">
+              <li>10 extensions</li>
+              <li>Weekly check</li>
+              <li>Risk report in the browser</li>
+            </ul>
+          </article>
+          <article class="plan plan--featured">
+            <p class="plan__flag">Most teams</p>
+            <h3 class="plan__name">Team</h3>
+            <p class="plan__price">$29<span class="plan__period">/month</span></p>
+            <ul class="plan__features">
+              <li>250 extensions</li>
+              <li>Daily checks</li>
+              <li>Email and Slack alerts</li>
+              <li>CSV export</li>
+            </ul>
+          </article>
+          <article class="plan">
+            <h3 class="plan__name">Business</h3>
+            <p class="plan__price">$99<span class="plan__period">/month</span></p>
+            <ul class="plan__features">
+              <li>Unlimited extensions</li>
+              <li>SSO</li>
+              <li>Chrome policy export</li>
+              <li>Audit log</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+    </section>
+
+    <!-- Workspace -->
+    <section id="view-workspace" class="view" hidden>
+      <div class="page-head">
+        <h1 class="page-title">Workspace</h1>
+        <p class="page-sub">Review the extensions you scanned, then set a watchlist to catch silent updates.</p>
+      </div>
+
+      <form id="watchForm" class="watch-form" hidden>
+        <label class="sr-only" for="watchName">Watchlist name</label>
+        <input id="watchName" class="watch-form__input" type="text" maxlength="80" placeholder="Watchlist name" />
+        <button type="submit" class="btn btn--primary">Watch this list</button>
+        <span class="try__note">Get a private link that tracks changes over time.</span>
+      </form>
+      <p id="watchStatus" class="status" role="status" aria-live="polite" hidden></p>
+
+      <div class="table-wrap" aria-live="polite">
+        <table class="results">
+          <thead>
+            <tr>
+              <th scope="col">Extension</th>
+              <th scope="col">Risk</th>
+              <th scope="col">Score</th>
+              <th scope="col" class="results__top-col">Top finding</th>
+              <th scope="col"><span class="sr-only">Details</span></th>
+            </tr>
+          </thead>
+          <tbody id="resultsTbody"></tbody>
+        </table>
+      </div>
+      <p id="scanStatus" class="status" role="status" aria-live="polite"></p>
+      <p class="back"><a href="/" data-nav="landing">Scan a different list</a></p>
+    </section>
+
+    <!-- Methodology -->
+    <section id="view-methodology" class="view" hidden>
+      <div class="page-head">
+        <h1 class="page-title">Methodology</h1>
+        <p class="page-sub">Every score is a sum of transparent rules. No black box, no magic number.</p>
+      </div>
+
+      <div class="card">
+        <p class="card__hint">
+          Each permission is worth points proportional to how much it can reach. The risk score is the total, capped at 100.
+          Grade bands: 0&ndash;19 A, 20&ndash;39 B, 40&ndash;59 C, 60&ndash;79 D, 80+ F.
+        </p>
+        <div id="rulesWrap" class="rules-wrap"></div>
+      </div>
+      <p class="back"><a href="/" data-nav="landing">Back to product</a></p>
+    </section>
+
+    <!-- Watchlist -->
+    <section id="view-watchlist" class="view" hidden>
+      <div class="page-head">
+        <h1 class="page-title" id="watchTitle">Watchlist</h1>
+        <p class="page-sub" id="watchMeta"></p>
+        <p class="watch-link-line">Share link: <a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
+      </div>
+
+      <section aria-labelledby="changes-heading">
+        <h2 class="section-title" id="changes-heading">Change log</h2>
+        <div id="watchChanges" class="card"></div>
+      </section>
+
+      <section aria-labelledby="ext-heading">
+        <h2 class="section-title" id="ext-heading">Extensions</h2>
+        <div id="watchExtensions" class="card"></div>
+      </section>
+      <p class="back"><a href="/" data-nav="landing">Back to product</a></p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Extension Watch by Michael Lip, github.com/theluckystrike. Not affiliated with Google.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
