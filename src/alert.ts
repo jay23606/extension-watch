@@ -1,6 +1,6 @@
 import type { LoggedChange, Watchlist } from "./store.js";
 
-// Outgoing alerts. One https webhook per watchlist. The JSON body carries `text` (Slack) and `content` (Discord).
+// Outgoing alerts. One https webhook per watchlist. The JSON body carries `text` (Slack, Google Chat) and `content` (Discord).
 // The payload holds only the watchlist name and public extension data. Redirects are not followed.
 
 const LABEL: Record<string, string> = {
@@ -11,13 +11,24 @@ const LABEL: Record<string, string> = {
 };
 const RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
+/** Webhooks must be a public https host name on the default port: no IP literals, no user names, no internal names. */
 export function webhookProblem(raw: string): string | null {
+  if (raw.length > 500) return "That URL is too long.";
   let u: URL;
   try { u = new URL(raw); } catch { return "That is not a valid URL."; }
   if (u.protocol !== "https:") return "Use an https webhook URL.";
-  if (raw.length > 500) return "That URL is too long.";
-  if (/^(localhost|127\.|10\.|192\.168\.|169\.254\.)/.test(u.hostname) || !u.hostname.includes(".")) return "Use a public webhook URL.";
+  if (u.username || u.password) return "Remove the user name and password from the URL.";
+  if (u.port !== "") return "Use the standard https port.";
+  const host = u.hostname.toLowerCase();
+  if (/^[\d.]+$/.test(host) || host.startsWith("[")) return "Use a host name, not an IP address.";
+  if (!host.includes(".") || /(^|\.)(localhost|local|internal|intranet|lan|home|corp|localtest\.me|nip\.io|sslip\.io)$/.test(host)) return "Use a public webhook host.";
   return null;
+}
+
+/** What a saved webhook looks like when shown back: the host only. */
+export function maskWebhook(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try { return `https://${new URL(raw).hostname}/...`; } catch { return "https://.../..."; }
 }
 
 /** Changes worth a notification: medium severity or above. */
@@ -35,9 +46,7 @@ export async function sendAlert(wl: Watchlist, changes: LoggedChange[], link: st
   for (const [id, s] of Object.entries(wl.snapshots)) names[id] = s.manifest?.name ?? id;
   const text = alertText(wl.name, changes, names, link);
   const host = new URL(wl.webhook).hostname;
-  const init: RequestInit = host === "ntfy.sh"
-    ? { method: "POST", body: text, headers: { Title: "Extension Watch alert", Tags: "warning" } }
-    : { method: "POST", body: JSON.stringify({ text, content: text.slice(0, 1900) }), headers: { "content-type": "application/json" } };
+  const init: RequestInit = { method: "POST", body: JSON.stringify({ text, content: text.slice(0, 1900) }), headers: { "content-type": "application/json" } };
   try {
     const res = await fetch(wl.webhook, { ...init, redirect: "manual", signal: AbortSignal.timeout(5000) });
     return { ok: res.ok, status: res.status };

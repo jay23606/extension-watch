@@ -5,8 +5,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./web", "binding": "ASSETS", "not_found_handling": "single-page-application" },
   "kv_namespaces": [{ "binding": "WATCHLISTS", "id": "764ada75c1d7466090099c73076192a4" }],
+  "ratelimits": [{ "name": "WRITE_LIMIT", "namespace_id": "4711", "simple": { "limit": 20, "period": 60 } }],
   "triggers": { "crons": ["*/10 * * * *"] },
   "workers_dev": true,
   "observability": { "enabled": false },
-  "limits": { "cpu_ms": 300 }
+  "limits": { "cpu_ms": 3000 }
 }

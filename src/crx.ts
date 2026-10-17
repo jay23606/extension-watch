@@ -1,12 +1,9 @@
 import { FetchError, type Manifest } from "./types";
 
-const DOWNLOAD_TIMEOUT_MS = 8000;
+const DOWNLOAD_TIMEOUT_MS = 25000;
 const MAX_CRX_BYTES = 60 * 1024 * 1024;
-const STREAM_LIMIT = 40 * 1024 * 1024;
-const LOCALE_SCAN_BYTES = 8 * 1024 * 1024;
 const MAX_CHUNKS = 1_000_000;
 const MAX_BLOCKS = 1_000_000;
-const UNSIZED_ENTRY_BYTES = 1024 * 1024;
 const MAXBITS = 15;
 
 const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
@@ -308,139 +305,224 @@ function readLocalData(zip: Uint8Array, localOffset: number, compSize: number): 
 const TAIL_BYTES = 256 * 1024;
 
 type Ranged = (start: number, end: number) => Promise<Uint8Array>;
+/** Bytes from `from`, up to `len` long (may be shorter at the end of what is available). */
+type Reader = (from: number, len: number) => Promise<Uint8Array>;
+interface DirEntry { local: number; size: number; method: number }
 
-/** Central directory entries: name -> local header offset (relative to the ZIP start). */
-function centralEntries(zip: Uint8Array): Map<string, { local: number; size: number }> {
-  const out = new Map<string, { local: number; size: number }>();
-  const eocd = findEocd(zip);
-  if (eocd < 0) throw new FetchError(400, "Invalid ZIP");
-  let off = u32le(zip, eocd + 16);
-  for (let i = 0, n = u16le(zip, eocd + 10); i < n; i++) {
-    if (u32le(zip, off) !== 0x02014b50) throw new FetchError(400, "Invalid ZIP central directory");
-    const nameLen = u16le(zip, off + 28);
-    out.set(decodeUtf8(zip.subarray(off + 46, off + 46 + nameLen)), { local: u32le(zip, off + 42), size: u32le(zip, off + 20) });
-    off += 46 + nameLen + u16le(zip, off + 30) + u16le(zip, off + 32);
+const INDEX_TAIL_BYTES = 2 * 1024 * 1024;
+const CAPTURE_MANIFEST = 512 * 1024;
+const CAPTURE_LOCALE = 256 * 1024;
+const CAPTURE_BUDGET = 24 * 1024 * 1024;
+const MAX_CAPTURES = 400;
+const MAX_STREAM_BYTES = 250 * 1024 * 1024;
+const HEAD_BYTES = 64 * 1024;
+const CARRY_BYTES = 128;
+const LOCALE_NAME = /^_locales\/[A-Za-z_-]{2,12}\/messages\.json$/;
+
+/** End of central directory record, searched backwards in the tail (comment up to 64 KB). */
+function directoryRef(zipStart: number, tail: Uint8Array): { at: number; size: number; count: number } {
+  const min = Math.max(0, tail.length - 22 - 65535);
+  for (let i = tail.length - 22; i >= min; i--) {
+    if (u32le(tail, i) === 0x06054b50) return { at: zipStart + u32le(tail, i + 16), size: u32le(tail, i + 12), count: u16le(tail, i + 10) };
   }
+  throw new FetchError(400, "Invalid ZIP: end of central directory not found");
+}
+
+function parseDirectory(cd: Uint8Array, count: number): Map<string, DirEntry> {
+  const map = new Map<string, DirEntry>();
+  let p = 0;
+  for (let n = 0; n < count && p + 46 <= cd.length; n++) {
+    if (u32le(cd, p) !== 0x02014b50) throw new FetchError(400, "Invalid ZIP central directory");
+    const nameLen = u16le(cd, p + 28);
+    const name = decodeUtf8(cd.subarray(p + 46, p + 46 + nameLen));
+    if (!map.has(name)) map.set(name, { local: u32le(cd, p + 42), size: u32le(cd, p + 20), method: u16le(cd, p + 10) });
+    p += 46 + nameLen + u16le(cd, p + 30) + u16le(cd, p + 32);
+  }
+  return map;
+}
+
+/** Read one entry at the offset the central directory gives. The local header must carry the same name, as in Chrome. */
+async function readIndexed(read: Reader, zipStart: number, name: string, e: DirEntry): Promise<Uint8Array> {
+  const from = zipStart + e.local;
+  const head = await read(from, 30 + 1024 + e.size);
+  if (head.length < 30 || u32le(head, 0) !== 0x04034b50) throw new FetchError(400, "Invalid ZIP local header");
+  const nameLen = u16le(head, 26);
+  if (decodeUtf8(head.subarray(30, 30 + nameLen)) !== name) throw new FetchError(400, "ZIP local header does not match the central directory");
+  const start = 30 + nameLen + u16le(head, 28);
+  let data = head.subarray(start, start + e.size);
+  if (data.length < e.size) data = await read(from + start, e.size);
+  if (data.length < e.size) throw new FetchError(422, "Could not read the whole manifest entry");
+  return inflateEntry(data, e.method);
+}
+
+async function manifestFromIndex(zipStart: number, tail: Uint8Array, tailStart: number, read: Reader, id: string, fetchFn?: typeof fetch): Promise<Manifest> {
+  const ref = directoryRef(zipStart, tail);
+  const cd = ref.at >= tailStart ? tail.subarray(ref.at - tailStart, ref.at - tailStart + ref.size) : await read(ref.at, ref.size);
+  if (cd.length < ref.size) throw new FetchError(422, "The ZIP index of this package is too large to read");
+  const entries = parseDirectory(cd, ref.count);
+  const me = entries.get("manifest.json");
+  if (!me) throw new FetchError(400, "manifest.json not found");
+  const json = parseManifestJson(await readIndexed(read, zipStart, "manifest.json", me));
+  const dl = json.default_locale;
+  let messages: Record<string, { message: string }> | null = null;
+  if (typeof dl === "string" && dl !== "") {
+    const name = entries.has(`_locales/${dl}/messages.json`) ? `_locales/${dl}/messages.json` : "_locales/en/messages.json";
+    const le = entries.get(name);
+    try {
+      if (le) messages = parseMessages(await readIndexed(read, zipStart, name, le));
+    } catch (err) {
+      console.log("locale read failed", err instanceof Error ? err.message : "error");
+    }
+  }
+  const manifest = buildManifest(json, id, messages);
+  if (manifest.name.includes("__MSG_")) manifest.name = (await storeTitle(id, fetchFn)) ?? stripMarkers(manifest.name);
+  if (manifest.description.includes("__MSG_")) manifest.description = "";
+  return manifest;
+}
+
+function inflateEntry(data: Uint8Array, method: number): Uint8Array {
+  if (method === 0) return data;
+  if (method === 8) return inflateRaw(data);
+  throw new FetchError(400, "Unsupported compression method");
+}
+
+interface Segment { start: number; bytes: Uint8Array; len: number }
+
+function segmentReader(segments: Segment[]): Reader {
+  // Captures can overlap (a long capture runs into the next entry), so take the segment that holds the most bytes from `from`.
+  return async (from, len) => {
+    let best: Segment | null = null;
+    for (const seg of segments) {
+      if (from >= seg.start && from < seg.start + seg.len && (!best || seg.start + seg.len > best.start + best.len)) best = seg;
+    }
+    if (!best) throw new FetchError(422, "A needed part of this package was not kept while streaming");
+    return best.bytes.subarray(from - best.start, Math.min(best.len, from - best.start + len));
+  };
+}
+
+interface Capture extends Segment { cap: number }
+
+/** Collects the bytes after every local header named manifest.json or _locales/<x>/messages.json while the package streams past.
+ * Buffers grow on demand, and a capture ends where the next local header starts (ZIP entries are contiguous), so memory follows
+ * the size of the wanted entries, not the package. A spoofed header can only cut a capture short, which fails the read (closed). */
+class Capturer {
+  readonly captures: Capture[] = [];
+  private readonly seen = new Set<number>();
+  private budget = CAPTURE_BUDGET;
+  private carry = new Uint8Array(0);
+
+  feed(chunk: Uint8Array, chunkStart: number): void {
+    for (const c of this.captures) if (c.len < c.cap) this.append(c, chunk.subarray(0, Math.min(c.cap - c.len, chunk.length)));
+    // Headers that start in the last bytes of the previous chunk: scan a small strip, not a copy of the whole chunk.
+    const carry = this.carry;
+    if (carry.length > 0) {
+      const strip = new Uint8Array(carry.length + Math.min(chunk.length, CARRY_BYTES));
+      strip.set(carry, 0);
+      strip.set(chunk.subarray(0, strip.length - carry.length), carry.length);
+      for (let i = strip.indexOf(0x50); i >= 0 && i < carry.length; i = strip.indexOf(0x50, i + 1)) {
+        if (isLocalHeader(strip, i)) this.header(strip, i, chunkStart - carry.length, (c) => this.append(c, chunk));
+      }
+    }
+    for (let i = chunk.indexOf(0x50); i >= 0; i = chunk.indexOf(0x50, i + 1)) {
+      if (isLocalHeader(chunk, i)) this.header(chunk, i, chunkStart, null);
+    }
+    // Keep the last CARRY_BYTES of the stream, even when chunks are smaller than that.
+    if (chunk.length >= CARRY_BYTES) {
+      this.carry = chunk.slice(chunk.length - CARRY_BYTES);
+    } else {
+      const joined = new Uint8Array(carry.length + chunk.length);
+      joined.set(carry, 0);
+      joined.set(chunk, carry.length);
+      this.carry = joined.slice(Math.max(0, joined.length - CARRY_BYTES));
+    }
+  }
+
+  /** `rest` appends the remainder of the current chunk when the header was found in the boundary strip. */
+  private header(buf: Uint8Array, i: number, base: number, rest: ((c: Capture) => void) | null): void {
+    this.closeBefore(base + i);
+    // In the strip, the bytes before carry.length belong to the previous chunk; `rest` then adds the whole current chunk.
+    const c = this.consider(buf, i, base, rest ? this.carry.length : buf.length);
+    if (c && rest) rest(c);
+  }
+
+  private append(c: Capture, part: Uint8Array): void {
+    if (c.len + part.length > c.bytes.length) {
+      let size = c.bytes.length * 2;
+      for (let k = 0; k < 32 && size < c.len + part.length; k++) size *= 2;
+      const next = new Uint8Array(Math.min(c.cap, size));
+      next.set(c.bytes.subarray(0, c.len));
+      c.bytes = next;
+    }
+    c.bytes.set(part, c.len);
+    c.len += part.length;
+  }
+
+  /** A new local header at `abs` ends every capture that started before it. */
+  private closeBefore(abs: number): void {
+    for (const c of this.captures) {
+      if (c.start < abs && c.start + c.cap > abs) {
+        c.cap = abs - c.start;
+        c.len = Math.min(c.len, c.cap);
+      }
+    }
+  }
+
+  /** Start a capture for a wanted header at buf[i]; it takes buf[i..end). Returns it, or null. */
+  private consider(buf: Uint8Array, i: number, base: number, end: number): Capture | null {
+    if (i + 30 > buf.length) return null;
+    const nameLen = u16le(buf, i + 26);
+    if (nameLen > 64 || i + 30 + nameLen > buf.length) return null;
+    const name = decodeUtf8(buf.subarray(i + 30, i + 30 + nameLen));
+    const cap = name === "manifest.json" ? CAPTURE_MANIFEST : LOCALE_NAME.test(name) ? CAPTURE_LOCALE : 0;
+    const abs = base + i;
+    if (cap === 0 || this.seen.has(abs) || this.budget < cap || this.captures.length >= MAX_CAPTURES) return null;
+    this.seen.add(abs);
+    this.budget -= cap;
+    const c: Capture = { start: abs, bytes: new Uint8Array(Math.min(cap, 16 * 1024)), len: 0, cap };
+    this.captures.push(c);
+    this.append(c, buf.subarray(i, Math.min(end, i + cap)));
+    return c;
+  }
+}
+
+function isLocalHeader(b: Uint8Array, i: number): boolean {
+  return i + 4 <= b.length && b[i + 1] === 0x4b && b[i + 2] === 3 && b[i + 3] === 4;
+}
+
+function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
   return out;
 }
 
-/**
- * Large packages (password managers are 25 MB and more) are read with HTTP range requests into a sparse buffer:
- * the head, the ZIP directory at the end, then only manifest.json and the locale files. The existing parser then
- * runs unchanged on the sparse buffer, because it only touches those regions.
- */
-async function sparseManifest(total: number, head: Uint8Array, get: Ranged, id: string): Promise<Manifest> {
-  const buf = new Uint8Array(total);
-  buf.set(head, 0);
-  const tailStart = Math.max(head.length, total - TAIL_BYTES);
-  buf.set(await get(tailStart, total - 1), tailStart);
-  const zipStart = crxZipOffset(buf);
-  const zip = buf.subarray(zipStart);
-  const eocd = findEocd(zip);
-  if (eocd < 0) throw new FetchError(400, "Invalid ZIP");
-  const cdStart = zipStart + u32le(zip, eocd + 16);
-  if (cdStart < tailStart) buf.set(await get(cdStart, tailStart - 1), cdStart);
-  const entries = centralEntries(zip);
-  const fill = async (name: string) => {
-    const e = entries.get(name);
-    if (!e) return;
-    const from = zipStart + e.local;
-    buf.set(await get(from, Math.min(total - 1, from + 30 + 1024 + e.size)), from);
-  };
-  await fill("manifest.json");
-  const raw = readZipEntry(zip, "manifest.json");
-  // Same parser as parseCrx (comments and BOM stripped), so both paths agree on the locale.
-  const dl = raw ? parseManifestJson(raw).default_locale : null;
-  const locale = typeof dl === "string" ? dl : null;
-  if (locale) await Promise.all([fill(`_locales/${locale}/messages.json`), fill("_locales/en/messages.json")]);
-  return parseCrx(buf, id);
-}
-
-class StreamBuffer {
-  private store = new Uint8Array(64 * 1024);
-  size = 0;
-
-  append(chunk: Uint8Array): void {
-    const need = this.size + chunk.length;
-    if (need > this.store.length) {
-      let cap = this.store.length * 2;
-      for (let k = 0; k < 40 && cap < need; k++) cap *= 2;
-      const next = new Uint8Array(cap);
-      next.set(this.store.subarray(0, this.size));
-      this.store = next;
-    }
-    this.store.set(chunk, this.size);
-    this.size = need;
-  }
-
-  data(): Uint8Array {
-    return this.store;
-  }
-
-  slice(): Uint8Array {
-    return this.store.subarray(0, this.size);
-  }
-}
-
-type Wanted = "manifest" | "locale" | "en" | null;
-
-interface LocalEntry { name: string; method: number; dataStart: number; dataEnd: number; }
-
-async function ensure(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, need: number): Promise<boolean> {
-  for (let chunk = 0; chunk < MAX_CHUNKS && buf.size < need && buf.size < STREAM_LIMIT; chunk++) {
+/** Google ignores Range for large packages: stream the whole package once, keeping only the head, a rolling tail and the captured entries. */
+async function streamManifest(response: Response, id: string, fetchFn?: typeof fetch): Promise<Manifest> {
+  if (!response.body) throw new FetchError(404, "Not on the Chrome Web Store");
+  const reader = response.body.getReader();
+  const capturer = new Capturer();
+  const headChunks: Uint8Array[] = [];
+  const tailChunks: Uint8Array[] = [];
+  let headLen = 0;
+  let tailLen = 0;
+  let pos = 0;
+  for (let n = 0; n < MAX_CHUNKS; n++) {
     const { value, done } = await reader.read();
-    if (done) return false;
-    buf.append(value);
+    if (done) break;
+    capturer.feed(value, pos);
+    if (headLen < HEAD_BYTES) { headChunks.push(value); headLen += value.length; }
+    tailChunks.push(value);
+    tailLen += value.length;
+    for (let k = 0; k < MAX_CHUNKS && tailChunks.length > 1 && tailLen - tailChunks[0]!.length >= INDEX_TAIL_BYTES; k++) tailLen -= tailChunks.shift()!.length;
+    pos += value.length;
+    if (pos > MAX_STREAM_BYTES) { await reader.cancel(); throw new FetchError(413, "Extension package exceeds 250 MB"); }
   }
-  return buf.size >= need;
-}
-
-/** Local header at pos. Entries with a data descriptor (sizes unknown) get dataEnd -1: DEFLATE marks its own end. */
-async function readLocalEntry(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, pos: number): Promise<LocalEntry | "end"> {
-  if (!(await ensure(buf, reader, pos + 30))) return "end";
-  if (u32le(buf.data(), pos) !== 0x04034b50) return "end";
-  const flags = u16le(buf.data(), pos + 6);
-  const method = u16le(buf.data(), pos + 8);
-  const compSize = u32le(buf.data(), pos + 18);
-  const nameLen = u16le(buf.data(), pos + 26);
-  const extraLen = u16le(buf.data(), pos + 28);
-  if (!(await ensure(buf, reader, pos + 30 + nameLen))) return "end";
-  const name = decodeUtf8(buf.data().subarray(pos + 30, pos + 30 + nameLen));
-  const dataStart = pos + 30 + nameLen + extraLen;
-  const sized = (flags & 0x0008) === 0 || compSize !== 0;
-  return { name, method, dataStart, dataEnd: sized ? dataStart + compSize : -1 };
-}
-
-async function entryData(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, entry: LocalEntry): Promise<Uint8Array> {
-  if (entry.dataEnd >= 0) {
-    if (!(await ensure(buf, reader, entry.dataEnd))) throw new FetchError(400, "Truncated ZIP entry");
-    return inflateEntry(buf.data().subarray(entry.dataStart, entry.dataEnd), entry.method);
-  }
-  if (entry.method !== 8) throw new FetchError(400, "Unsupported ZIP entry");
-  // Size unknown: read up to 1 MB of compressed data (manifests and messages are far smaller) and inflate to the final block.
-  await ensure(buf, reader, entry.dataStart + UNSIZED_ENTRY_BYTES);
-  return inflateRaw(buf.slice().subarray(entry.dataStart, Math.min(buf.size, entry.dataStart + UNSIZED_ENTRY_BYTES)));
-}
-
-/** Find the local header of `name` in the bytes streamed so far, reading on up to LOCALE_SCAN_BYTES. Native indexOf keeps CPU low. */
-async function findLocal(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, from: number, name: string): Promise<number> {
-  const target = new TextEncoder().encode(name);
-  let i = from;
-  // Each pass advances i by at least one byte or reads at least one more chunk, inside an 8 MB window.
-  for (let pass = 0; pass < LOCALE_SCAN_BYTES * 2; pass++) {
-    const data = buf.slice();
-    i = data.indexOf(0x50, i);
-    if (i < 0 || i + 30 + target.length > data.length) {
-      if (buf.size >= LOCALE_SCAN_BYTES) return -1;
-      const before = buf.size;
-      if (!(await ensure(buf, reader, buf.size + 65536)) && buf.size === before) return -1;
-      i = Math.max(from, (i < 0 ? before : i) - 64);
-      continue;
-    }
-    if (u32le(data, i) === 0x04034b50 && u16le(data, i + 26) === target.length && target.every((b, k) => data[i + 30 + k] === b)) return i;
-    i++;
-  }
-  return -1;
+  if (pos === 0) throw new FetchError(404, "Not on the Chrome Web Store");
+  const head = concatChunks(headChunks, headLen);
+  const tail = concatChunks(tailChunks, tailLen);
+  const zipStart = crxZipOffset(head);
+  const read = segmentReader([{ start: 0, bytes: head, len: head.length }, { start: pos - tail.length, bytes: tail, len: tail.length }, ...capturer.captures]);
+  return manifestFromIndex(zipStart, tail, pos - tail.length, read, id, fetchFn);
 }
 
 /** Display name from the extension's Web Store page title, used when the locale file is too deep in a large package. */
@@ -471,58 +553,6 @@ function decodeEntities(s: string): string {
   return s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
-function inflateEntry(data: Uint8Array, method: number): Uint8Array {
-  if (method === 0) return data;
-  if (method === 8) return inflateRaw(data);
-  throw new FetchError(400, "Unsupported compression method");
-}
-
-function wanted(name: string, locale: string | null): Wanted {
-  if (name === "manifest.json") return "manifest";
-  if (locale === null) return null;
-  if (name === `_locales/${locale}/messages.json`) return "locale";
-  if (locale !== "en" && name === "_locales/en/messages.json") return "en";
-  return null;
-}
-
-async function streamManifest(response: Response, id: string, fetchFn?: typeof fetch): Promise<Manifest> {
-  if (!response.body) throw new FetchError(404, "Not on the Chrome Web Store");
-  const reader = response.body.getReader();
-  const buf = new StreamBuffer();
-  await ensure(buf, reader, 16);
-  if (buf.size === 0) throw new FetchError(404, "Not on the Chrome Web Store");
-  const zipStart = crxZipOffset(buf.slice());
-  try {
-    // Find the root manifest.json header directly: entries before it may have unknown sizes (data descriptors).
-    let manifestJson: Record<string, unknown> | null = null;
-    const at = await findLocal(buf, reader, zipStart, "manifest.json");
-    const entry = at >= 0 ? await readLocalEntry(buf, reader, at) : "end";
-    if (entry !== "end") manifestJson = parseManifestJson(await entryData(buf, reader, entry));
-    if (manifestJson === null) throw new FetchError(422, "manifest.json is not in the first 8 MB of this package");
-    const messages = await streamMessages(buf, reader, zipStart, manifestJson);
-    const manifest = buildManifest(manifestJson, id, parseMessages(messages));
-    if (messages === null && (manifest.name.includes("__MSG_") || manifest.description.includes("__MSG_"))) {
-      manifest.name = manifest.name.includes("__MSG_") ? (await storeTitle(id, fetchFn)) ?? stripMarkers(manifest.name) : manifest.name;
-      manifest.description = stripMarkers(manifest.description).replace(/^\S+$/, "");
-    }
-    return manifest;
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
-}
-
-async function streamMessages(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, from: number, manifestJson: Record<string, unknown>): Promise<Uint8Array | null> {
-  const dl = manifestJson.default_locale;
-  if (typeof dl !== "string" || dl === "") return null;
-  for (const loc of dl === "en" ? ["en"] : [dl, "en"]) {
-    const at = await findLocal(buf, reader, from, `_locales/${loc}/messages.json`);
-    if (at < 0) continue;
-    const entry = await readLocalEntry(buf, reader, at);
-    if (entry !== "end") return entryData(buf, reader, entry);
-  }
-  return null;
-}
-
 export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise<Manifest> {
   const normalized = normalizeId(id);
   if (!normalized) throw new FetchError(400, "Invalid extension id");
@@ -535,16 +565,19 @@ export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise
   if (first.status === 206) {
     const head = new Uint8Array(await first.arrayBuffer());
     if (head.byteLength === 0) throw new FetchError(404, "Not on the Chrome Web Store");
-    const total = Number(/\/(\d+)$/.exec(first.headers.get("content-range") ?? "")?.[1] ?? "0");
-    if (!total || total <= head.byteLength) return parseCrx(head, normalized);
-    if (total > 200 * 1024 * 1024) throw new FetchError(413, "Extension package exceeds 200 MB");
+    const total = Number(/\/(\d+)$/.exec(first.headers.get("content-range") ?? "")?.[1] ?? "0") || head.byteLength;
+    if (total > MAX_STREAM_BYTES) throw new FetchError(413, "Extension package exceeds 250 MB");
     const finalUrl = first.url || url;
     const get: Ranged = async (start, end) => {
       const r = await impl(finalUrl, { redirect: "follow", signal, headers: { range: `bytes=${start}-${end}` } });
       if (r.status !== 206) throw new FetchError(502, "The Chrome Web Store did not return the requested part");
       return new Uint8Array(await r.arrayBuffer());
     };
-    return sparseManifest(total, head, get, normalized);
+    const zipStart = crxZipOffset(head);
+    const tailStart = Math.max(0, total - TAIL_BYTES);
+    const tail = total <= head.byteLength ? head : await get(tailStart, total - 1);
+    const read: Reader = async (from, len) => (from + len <= head.byteLength ? head.subarray(from, from + len) : get(from, Math.min(total, from + len) - 1));
+    return manifestFromIndex(zipStart, tail, total <= head.byteLength ? 0 : tailStart, read, normalized, fetchFn);
   }
   return streamManifest(first, normalized, fetchFn);
 }

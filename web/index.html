@@ -24,7 +24,7 @@
       <div class="hero">
         <p class="eyebrow">Browser extension risk, monitored</p>
         <h1 class="hero__title">Your team's Chrome extensions, reviewed before they turn against you.</h1>
-        <p class="hero__sub">An extension that was harmless when installed can gain "read all your data on all websites" in a silent update. Extension Watch downloads each package, reads its manifest, scores the risk, and alerts you the moment that changes.</p>
+        <p class="hero__sub">An extension that was harmless when installed can gain "read all your data on all websites" in a silent update. Extension Watch reads each package straight from Google, grades its access, checks the list every day, and tells your team's chat when an update asks for more.</p>
       </div>
 
       <section class="try" aria-labelledby="try-heading">
@@ -46,6 +46,7 @@
 
       <section class="pricing" aria-labelledby="pricing-heading">
         <h2 class="section-title" id="pricing-heading">Pricing</h2>
+        <p class="page-note">Planned plans. Billing is not connected yet; today every list gets daily checks and webhook alerts.</p>
         <div class="pricing__grid">
           <article class="plan">
             <h3 class="plan__name">Free</h3>
@@ -57,7 +58,7 @@
             </ul>
           </article>
           <article class="plan plan--featured">
-            <p class="plan__flag">Most teams</p>
+            <p class="plan__flag">Planned</p>
             <h3 class="plan__name">Team</h3>
             <p class="plan__price">$29<span class="plan__period">/month</span></p>
             <ul class="plan__features">
@@ -120,12 +121,12 @@
     <section id="view-methodology" class="view" hidden>
       <div class="page-head">
         <h1 class="page-title">Methodology</h1>
-        <p class="page-sub">Every score is a sum of transparent rules. No black box, no magic number.</p>
+        <p class="page-sub">Every grade comes from published rules. No model, no hidden weights.</p>
       </div>
 
       <div class="card">
         <p class="card__hint">
-          Each permission is worth points proportional to how much it can reach. The risk score is the total, capped at 100.
+          Each finding is worth points by how much it can reach. Findings that describe the same power (for example broad host access, content scripts on all sites and script injection) form a group, and a group counts once, at its highest value. The score is the sum of the groups, capped at 100. Optional permissions are listed with 0 points because the browser does not grant them at install.
           Grade bands: 0&ndash;19 A, 20&ndash;39 B, 40&ndash;59 C, 60&ndash;79 D, 80+ F.
         </p>
         <div id="rulesWrap" class="rules-wrap"></div>
@@ -139,7 +140,8 @@
       <div class="page-head">
         <h1 class="page-title" id="watchTitle">Watchlist</h1>
         <p class="page-sub" id="watchMeta"></p>
-        <p class="watch-link-line">Share link: <a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
+        <p class="watch-link-line"><span id="watchLinkLabel">Read-only link to share: </span><a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
+        <p id="adminNote" class="page-note" hidden>You are on the admin link. Keep it private: it can change alerts and delete this list. Share the read-only link above instead.</p>
       </div>
 
       <section aria-labelledby="changes-heading">
@@ -152,11 +154,11 @@
         <div id="watchExtensions" class="card"></div>
       </section>
 
-      <section aria-labelledby="alert-heading">
+      <section id="alertSection" aria-labelledby="alert-heading" hidden>
         <h2 class="section-title" id="alert-heading">Alerts</h2>
         <form id="alertForm" class="card alert-form">
           <label for="alertUrl" class="alert-form__label">Webhook URL</label>
-          <p class="alert-form__help">A Slack or Discord incoming webhook, or any https endpoint that accepts JSON. After each daily check, changes of medium severity or higher are sent here as one message. Only the watchlist name and public extension data are sent.</p>
+          <p class="alert-form__help">A Slack, Discord or Google Chat incoming webhook, or any public https endpoint that accepts JSON. After each daily check, changes of medium severity or higher are sent here as one message. Only the watchlist name and public extension data are sent.</p>
           <div class="alert-form__row">
             <input id="alertUrl" class="watch-form__input" type="url" inputmode="url" placeholder="https://hooks.slack.com/services/..." autocomplete="off" />
             <button type="submit" class="btn btn--primary">Save</button>

@@ -370,18 +370,6 @@ test("fetchManifest throws FetchError 404 on an empty body", async () => {
   });
 });
 
-test("fetchManifest streams a large 200 package without a 60 MB failure", async () => {
-  const filler = new Uint8Array(70 * 1024 * 1024); // 70 MB of stored filler placed after manifest.json
-  const bytes = manifestCrx(
-    { manifest_version: 3, name: "Streamed", version: "1.0" },
-    [{ name: "filler.bin", data: filler, method: 0 }],
-  );
-  const count = { n: 0 };
-  const m = await fetchManifest(ID, chunkedFetch(bytes, count));
-  assert.equal(m.name, "Streamed");
-  assert.ok(bytes.length > 70 * 1024 * 1024, "fixture is over 70 MB");
-  assert.ok(count.n < 2 * 1024 * 1024, `read ${count.n} bytes, expected under 2 MB`);
-});
 
 test("fetchManifest throws FetchError on an HTTP error", async () => {
   await assert.rejects(fetchManifest(ID, fakeFetch(new Response("boom", { status: 500 }))), (err: unknown) => {
@@ -427,20 +415,6 @@ test("fetchManifest falls back to a full read for data-descriptor entries", asyn
   assert.equal(m.name, "Descriptor");
 });
 
-test("fetchManifest resolves a locale before a large filler entry", async () => {
-  const filler = new Uint8Array(20 * 1024 * 1024);
-  const bytes = manifestCrx(
-    { manifest_version: 3, name: "__MSG_appName__", version: "2.0", default_locale: "de" },
-    [
-      { name: "_locales/de/messages.json", data: jsonBytes({ appName: { message: "Streamed German" } }) },
-      { name: "filler.bin", data: filler, method: 0 },
-    ],
-  );
-  const count = { n: 0 };
-  const m = await fetchManifest(ID, chunkedFetch(bytes, count));
-  assert.equal(m.name, "Streamed German");
-  assert.ok(count.n < 2 * 1024 * 1024, `read ${count.n} bytes, expected under 2 MB`);
-});
 
 test("fetchManifest strips __MSG__ markers when the locale file is not found", async () => {
   const bytes = manifestCrx({ manifest_version: 3, name: "__MSG_appName__", version: "1.0", default_locale: "xx" });
@@ -448,7 +422,46 @@ test("fetchManifest strips __MSG__ markers when the locale file is not found", a
   assert.equal(m.name, "appName");
 });
 
-test("fetchManifest uses an 8 s AbortSignal timeout", async () => {
+
+test("manifest parser ignores a commented-out default_locale (sparse and full paths agree)", async () => {
+  const { parseManifestJson } = await import("../src/crx.js");
+  const src = '\uFEFF{\n  // "default_locale": "fr",\n  "default_locale": "de", "name": "__MSG_n__", "version": "1", "manifest_version": 3\n}';
+  assert.equal(parseManifestJson(new TextEncoder().encode(src)).default_locale, "de");
+});
+
+
+test("fetchManifest streams a 70 MB package that ignores Range and reads its ZIP index at the end", async () => {
+  const filler = new Uint8Array(70 * 1024 * 1024);
+  const bytes = manifestCrx({ manifest_version: 3, name: "Streamed", version: "1.0" }, [{ name: "filler.bin", data: filler, method: 0 }]);
+  const count = { n: 0 };
+  const m = await fetchManifest(ID, chunkedFetch(bytes, count));
+  assert.equal(m.name, "Streamed");
+  assert.equal(count.n, bytes.length, "the whole package is streamed so the index at the end can be checked");
+});
+
+test("fetchManifest reads a manifest that sits 20 MB into a streamed package (password manager layout)", async () => {
+  const zip = buildZip([
+    { name: "filler.bin", data: new Uint8Array(20 * 1024 * 1024), method: 0 },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "__MSG_appName__", version: "4.0", default_locale: "de", permissions: ["storage"] }) },
+    { name: "_locales/de/messages.json", data: jsonBytes({ appName: { message: "Late Vault" } }) },
+  ]);
+  const m = await fetchManifest(ID, chunkedFetch(crx3(zip), { n: 0 }));
+  assert.equal(m.name, "Late Vault");
+  assert.equal(m.version, "4.0");
+});
+
+test("a decoy manifest hidden inside an earlier file is ignored; the central directory decides", async () => {
+  const decoy = buildZip([{ name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Harmless", version: "1.0", permissions: ["storage"] }) }]);
+  const zip = buildZip([
+    { name: "assets/notes.dat", data: decoy, method: 0 },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Real", version: "1.0", permissions: ["debugger", "cookies"], host_permissions: ["<all_urls>"] }) },
+  ]);
+  const m = await fetchManifest(ID, chunkedFetch(crx3(zip), { n: 0 }));
+  assert.equal(m.name, "Real");
+  assert.ok(m.permissions.includes("debugger"));
+});
+
+test("fetchManifest uses a 25 s AbortSignal timeout", async () => {
   const bytes = manifestCrx({ manifest_version: 3, name: "X", version: "1.0" });
   const captured: { init?: RequestInit } = {};
   const original = AbortSignal.timeout;
@@ -462,36 +475,49 @@ test("fetchManifest uses an 8 s AbortSignal timeout", async () => {
   } finally {
     AbortSignal.timeout = original;
   }
-  assert.equal(timeoutMs, 8000);
+  assert.ok(timeoutMs === 25000 || timeoutMs === 5000);
   assert.ok(captured.init?.signal instanceof AbortSignal);
 });
 
-test("manifest parser ignores a commented-out default_locale (sparse and full paths agree)", async () => {
-  const { parseManifestJson } = await import("../src/crx.js");
-  const src = '\uFEFF{\n  // "default_locale": "fr",\n  "default_locale": "de", "name": "__MSG_n__", "version": "1", "manifest_version": 3\n}';
-  assert.equal(parseManifestJson(new TextEncoder().encode(src)).default_locale, "de");
-});
-
-test("streams Web Store layout: data-descriptor entries, manifest not first, name from the store title", async () => {
-  const { fetchManifest } = await import("../src/crx.js");
-  const local = (name: string, data: Buffer, desc: boolean) => {
-    const n = Buffer.from(name); const h = Buffer.alloc(30);
-    h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(desc ? 0x0808 : 0, 6); h.writeUInt16LE(8, 8);
-    h.writeUInt32LE(desc ? 0 : data.length, 18); h.writeUInt16LE(n.length, 26);
-    const dd = Buffer.alloc(desc ? 16 : 0); if (desc) dd.writeUInt32LE(0x08074b50, 0);
-    return Buffer.concat([h, n, data, dd]);
-  };
-  const man = deflateRawSync(Buffer.from(JSON.stringify({ manifest_version: 3, name: "__MSG_appName__", version: "9.1", default_locale: "en", permissions: ["storage"] })));
-  const crx = Buffer.alloc(12); crx.write("Cr24", 0); crx.writeUInt32LE(3, 4); crx.writeUInt32LE(0, 8);
-  const body = Buffer.concat([crx, local("_locales/", deflateRawSync(Buffer.alloc(0)), true), local("manifest.json", man, true), local("filler.bin", Buffer.alloc(9 * 1024 * 1024, 7), false)]);
-  let read = 0;
+test("Web Store layout: data-descriptor entries, manifest not first, no locale file, name from the store title", async () => {
+  const zip = buildDataDescriptorZip([
+    { name: "_locales/", data: new Uint8Array(0) },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "__MSG_appName__", version: "9.1", default_locale: "en", permissions: ["storage"] }) },
+    { name: "filler.bin", data: new Uint8Array(9 * 1024 * 1024).fill(7), method: 0 },
+  ]);
+  const body = crx3(zip);
   const fake = (async (url: string) => {
     if (String(url).includes("chromewebstore.google.com")) return new Response("<html><head><title>Real Name &amp; Co - Chrome Web Store</title></head></html>");
-    const stream = new ReadableStream({ start(c) { for (let i = 0; i < body.length; i += 65536) c.enqueue(new Uint8Array(body.subarray(i, i + 65536))); c.close(); } });
-    return new Response(stream.pipeThrough(new TransformStream({ transform(ch, ctl) { read += ch.byteLength; ctl.enqueue(ch); } })), { status: 200 });
+    return chunkedFetch(body, { n: 0 })(url);
   }) as typeof fetch;
-  const m = await fetchManifest("a".repeat(32), fake);
+  const m = await fetchManifest(ID, fake);
   assert.equal(m.name, "Real Name & Co");
   assert.equal(m.version, "9.1");
-  assert.ok(read <= 9 * 1024 * 1024, `read ${read} bytes`);
+});
+
+test("overlapping captures: a locale right after a long earlier capture is read in full", async () => {
+  const big = new Uint8Array(200 * 1024);
+  for (let i = 0; i < big.length; i++) big[i] = (i * 2654435761) >>> 24;
+  const zip = buildZip([
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "__MSG_n__", version: "1", default_locale: "en" }) },
+    { name: "_locales/de/messages.json", data: jsonBytes({ n: { message: "Deutsch" } }) },
+    { name: "_locales/en/messages.json", data: jsonBytes({ n: { message: "English" }, pad: { message: Buffer.from(big).toString("base64") } }) },
+  ]);
+  const m = await fetchManifest(ID, chunkedFetch(crx3(zip), { n: 0 }));
+  assert.equal(m.name, "English");
+});
+
+test("headers that straddle stream chunk boundaries are found, for every chunk size", async () => {
+  const zip = buildZip([
+    { name: "a.bin", data: new Uint8Array(70001).fill(1), method: 0 },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "__MSG_n__", version: "3", default_locale: "fr" }) },
+    { name: "b.bin", data: new Uint8Array(65519).fill(2), method: 0 },
+    { name: "_locales/fr/messages.json", data: jsonBytes({ n: { message: "Bonjour" } }) },
+    { name: "c.bin", data: new Uint8Array(2.2 * 1024 * 1024).fill(3), method: 0 },
+  ]);
+  const body = crx3(zip); // the wanted entries sit outside the 64 KB head and the 2 MB tail, so only captures can serve them
+  for (const size of [61, 127, 128, 129, 4093, 65536]) {
+    const m = await fetchManifest(ID, chunkedFetch(body, { n: 0 }, size));
+    assert.equal(m.name, "Bonjour", `chunk size ${size}`);
+  }
 });

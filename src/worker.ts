@@ -1,17 +1,20 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, cachedSnapshot, cacheSnapshot, dueTokens, IDLE_TTL, load, MAX_IDS, newToken, remove, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, remove, resolveView, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
 import { FetchError } from "./types.js";
-import { alertable, sendAlert, webhookProblem } from "./alert.js";
+import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
-interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv }
+interface RateLimit { limit(o: { key: string }): Promise<{ success: boolean }> }
+interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv; WRITE_LIMIT?: RateLimit }
 
 const MAX_SCAN = 25;
 const NOT_LISTED = "Not on the Chrome Web Store";
 const DAY_MS = 86_400_000;
-/** One cron run (every 10 minutes) downloads at most this many packages: about 17,000 a day, inside Worker limits. */
+/** One cron run (every 10 minutes) downloads at most this many packages: about 17,000 a day. */
 const FETCH_BUDGET = 120;
+/** One run touches at most this many lists, which keeps KV operations per invocation under Cloudflare's 1,000 limit. */
+const MAX_LISTS_PER_RUN = 150;
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -22,7 +25,8 @@ async function fresh(id: string): Promise<Snapshot> {
     return { id, manifest, assessment: assess(manifest), error: null, checkedAt };
   } catch (err) {
     const error = err instanceof FetchError ? err.message : "Could not read this extension right now.";
-    return { id, manifest: null, assessment: null, error, checkedAt };
+    const transient = !(err instanceof FetchError) || err.status >= 500 || err.status === 429;
+    return { id, manifest: null, assessment: null, error, checkedAt, transient };
   }
 }
 
@@ -33,7 +37,9 @@ function snapshotter(kv: Kv | null, memo: Map<string, Promise<Snapshot>>, budget
     if (known) return known;
     const job = (async () => {
       const hit = kv ? await cachedSnapshot(kv, id, today()) : null;
-      if (hit) return hit;
+      // Grades are recomputed from the cached manifest, so a rule change applies at once.
+      if (hit) return hit.manifest ? { ...hit, assessment: assess(hit.manifest) } : hit;
+      if (budget.left <= 0) return { id, manifest: null, assessment: null, error: "Check postponed to the next run.", checkedAt: new Date().toISOString(), transient: true };
       budget.left--;
       const snap = await fresh(id);
       if (kv) await cacheSnapshot(kv, snap, today());
@@ -81,7 +87,8 @@ function apply(wl: Watchlist, snaps: Snapshot[], initial: boolean): void {
       if (prev.error !== NOT_LISTED) wl.changes.push({ kind: "removed_from_store", value: prev.manifest.name, severity: "high", id: snap.id, at: now });
       wl.snapshots[snap.id] = { ...prev, error: NOT_LISTED, checkedAt: now };
     } else {
-      wl.snapshots[snap.id] = prev ? { ...prev, error: snap.error, checkedAt: prev.checkedAt } : snap;
+      if (!snap.transient) ok++; // a definitive answer (404, unreadable package) is a completed check
+      wl.snapshots[snap.id] = prev ? { ...prev, error: snap.error, checkedAt: snap.transient ? prev.checkedAt : now } : snap;
     }
   }
   if (ok > 0 || initial) wl.lastCheck = now;
@@ -90,18 +97,24 @@ function apply(wl: Watchlist, snaps: Snapshot[], initial: boolean): void {
 async function recheck(kv: Kv, token: string, get: (id: string) => Promise<Snapshot>, origin: string): Promise<void> {
   const wl = await load(kv, token);
   if (!wl) return;
-  // Not opened for 90 days: stop checking, so the KV expiry (renewed only by saves) removes it.
-  if (Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > IDLE_TTL * 1000) return;
+  // No webhook and not opened for 90 days: stop checking, so the KV expiry (renewed only by saves) removes it.
+  // Lists with a webhook stay active: the team reads them in chat.
+  if (!wl.webhook && Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > IDLE_TTL * 1000) return;
   const seen = wl.changes.length;
   apply(wl, await scanMany(wl.ids, get), false);
-  await save(kv, token, wl);
+  // Take the new changes before save() trims the log to its last 200 entries.
   const fresh = alertable(wl.changes.slice(seen));
-  if (fresh.length) await sendAlert(wl, fresh, `${origin}/w/${token}`);
+  if (fresh.length) {
+    const sent = await sendAlert(wl, fresh, `${origin}/w/${wl.viewToken ?? token}`);
+    if (sent.ok) wl.viewedAt = new Date().toISOString(); // a team that reads alerts in Slack is an active team
+  }
+  await save(kv, token, wl);
 }
 
 async function json<T>(request: Request): Promise<T> {
   // JSON only: a plain form post from another site cannot start work here.
-  if (!(request.headers.get("content-type") ?? "").includes("application/json")) throw new FetchError(415, "Send JSON with content-type application/json.");
+  const essence = (request.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (essence !== "application/json") throw new FetchError(415, "Send JSON with content-type application/json.");
   const text = await request.text();
   if (text.length > 50_000) throw new FetchError(413, "The request is too large.");
   try { return JSON.parse(text) as T; } catch { throw new FetchError(400, "Send JSON."); }
@@ -130,12 +143,20 @@ const routes: Record<string, Handler> = {
     return Response.json({ token, url: `/w/${token}`, dropped });
   },
   "GET /api/watchlists": async (_req, env, rest) => {
-    const wl = await load(env.WATCHLISTS, rest);
+    let token = rest;
+    let wl = await load(env.WATCHLISTS, token);
+    const role = wl ? "admin" : "viewer";
+    if (!wl) {
+      token = (await resolveView(env.WATCHLISTS, rest)) ?? "";
+      wl = token ? await load(env.WATCHLISTS, token) : null;
+    }
     if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
-    const today0 = today();
-    if ((wl.viewedAt ?? "").slice(0, 10) !== today0) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, rest, wl); }
-    const { webhook, ...rest2 } = wl;
-    return Response.json({ ...rest2, webhook: webhook ? webhook.replace(/^(https:\/\/[^/]+\/).{4,}$/, "$1...") : null, webhookSet: Boolean(webhook) });
+    const hadView = Boolean(wl.viewToken);
+    const viewToken = role === "admin" ? await ensureViewToken(env.WATCHLISTS, token, wl) : wl.viewToken;
+    if ((wl.viewedAt ?? "").slice(0, 10) !== today() || !hadView) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, token, wl); }
+    const { webhook, viewToken: _v, ...shown } = wl;
+    if (role === "viewer") return Response.json({ ...shown, role, webhook: null, webhookSet: Boolean(webhook) });
+    return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook) });
   },
   "DELETE /api/watchlists": async (_req, env, rest) =>
     (await remove(env.WATCHLISTS, rest)) ? Response.json({ deleted: true }) : Response.json({ error: "This watchlist does not exist." }, { status: 404 }),
@@ -171,7 +192,7 @@ export default {
     const budget = { left: FETCH_BUDGET };
     const get = snapshotter(env.WATCHLISTS, new Map(), budget);
     const origin = env.ORIGIN ?? "https://extension-watch.lipmichal.workers.dev";
-    for (const token of await dueTokens(env.WATCHLISTS, DAY_MS - 3_600_000)) {
+    for (const token of (await dueTokens(env.WATCHLISTS, DAY_MS - 3_600_000)).slice(0, MAX_LISTS_PER_RUN)) {
       if (budget.left <= 0) break;
       await recheck(env.WATCHLISTS, token, get, origin);
     }
@@ -191,6 +212,10 @@ function secure(res: Response): Response {
 
 async function route(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Burst limit per address on every write (Cloudflare rate limiting binding); the daily KV counters are approximate on top.
+    if (request.method !== "GET" && url.pathname.startsWith("/api/") && env.WRITE_LIMIT && !(await env.WRITE_LIMIT.limit({ key: ipOf(request) })).success) {
+      return Response.json({ error: "Too many requests. Wait a minute and try again." }, { status: 429 });
+    }
     if (url.pathname.startsWith("/w/")) return env.ASSETS.fetch(new Request(new URL("/", url), request));
     const [, , a = "", rest = ""] = url.pathname.split("/");
     const handler = routes[`${request.method} /api/${a}`];

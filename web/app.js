@@ -73,9 +73,10 @@ function normalizeId(input) {
 function parseIds(text) {
   const ids = [];
   const seen = new Set();
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const id = normalizeId(line);
-    if (id && !seen.has(id)) {
+  // Policy exports often put many IDs on one line, separated by commas or spaces.
+  for (const match of String(text || "").matchAll(/[a-p]{32}/g)) {
+    const id = match[0];
+    if (!seen.has(id)) {
       seen.add(id);
       ids.push(id);
     }
@@ -360,23 +361,27 @@ function buildWatchExtensions(extensions) {
 function renderWatchlist(data, token) {
   $("#watchTitle").textContent = (data && data.name) || "Watchlist";
   $("#watchMeta").textContent = watchMetaText(data);
+  const admin = Boolean(data && data.role === "admin");
+  const shareToken = admin && data.viewToken ? data.viewToken : token;
   const link = $("#watchLink");
-  link.href = "/w/" + token;
-  link.textContent = window.location.origin + "/w/" + token;
-  wireAlerts(token, data && data.webhookSet ? data.webhook : null);
+  link.href = "/w/" + shareToken;
+  link.textContent = window.location.origin + "/w/" + shareToken;
+  $("#watchLinkLabel").textContent = admin ? "Read-only link to share: " : "Read-only view: ";
+  $("#adminNote").hidden = !admin;
+  $("#alertSection").hidden = !admin;
+  if (admin) wireAlerts(token, data && data.webhookSet ? data.webhook : null);
   let del = document.getElementById("watchDelete");
-  if (!del) {
-    del = el("button", "btn btn--ghost", "Delete this watchlist");
-    del.id = "watchDelete";
-    del.type = "button";
-    link.parentNode.appendChild(del);
+  if (!admin) {
+    if (del) del.remove();
+  } else {
+    if (!del) {
+      del = el("button", "btn btn--ghost", "Delete this watchlist");
+      del.id = "watchDelete";
+      del.type = "button";
+      link.parentNode.appendChild(del);
+    }
+    del.onclick = () => deleteWatchlist(token, del);
   }
-  del.onclick = async () => {
-    if (!window.confirm("Delete this watchlist and its history? This cannot be undone.")) return;
-    const res = await fetch("/api/watchlists/" + encodeURIComponent(token), { method: "DELETE" });
-    $("#watchMeta").textContent = res.ok ? "Deleted. This link no longer works." : "Could not delete. Try again.";
-    if (res.ok) { $("#watchExtensions").replaceChildren(); $("#watchChanges").replaceChildren(); del.remove(); }
-  };
   const changes = $("#watchChanges");
   const names = {};
   for (const [id, snap] of Object.entries((data && data.snapshots) || {})) names[id] = snap && snap.manifest ? snap.manifest.name : id;
@@ -387,6 +392,21 @@ function renderWatchlist(data, token) {
   const snaps = (data && data.snapshots) || {};
   const list = ((data && data.ids) || Object.keys(snaps)).map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
+}
+
+async function deleteWatchlist(token, button) {
+  if (!window.confirm("Delete this watchlist and its history? This cannot be undone.")) return;
+  try {
+    const res = await fetch("/api/watchlists/" + encodeURIComponent(token), { method: "DELETE" });
+    if (!res.ok) throw new Error("status " + res.status);
+    $("#watchMeta").textContent = "Deleted. Both links no longer work.";
+    $("#watchExtensions").replaceChildren();
+    $("#watchChanges").replaceChildren();
+    $("#alertSection").hidden = true;
+    button.remove();
+  } catch (err) {
+    $("#watchMeta").textContent = "Could not delete (" + err.message + "). Try again.";
+  }
 }
 
 function wireAlerts(token, webhook) {
@@ -402,7 +422,7 @@ function wireAlerts(token, webhook) {
       const res = await apiJson("/api/watchlists/" + encodeURIComponent(token), {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ webhook: input.value.trim() }),
       });
-      webhook = res.webhook ? input.value.trim().replace(/^(https:\/\/[^/]+\/).{4,}$/, "$1...") : null;
+      webhook = res.webhook ? "https://" + new URL(input.value.trim()).hostname + "/..." : null;
       input.value = "";
       input.placeholder = webhook ? "Saved: " + webhook + " Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
       setStatus(status, res.webhook ? "Saved. Changes will be sent to this webhook." : "Alerts turned off.", "info");
@@ -524,7 +544,7 @@ function wireTryForm() {
     try {
       const results = await runScan(ids);
       lastIds = ids;
-      const invalid = $("#tryInput").value.split(/\s+/).filter(Boolean).filter((line) => parseIds(line).length === 0);
+      const invalid = $("#tryInput").value.split(/[\s,;]+/).filter(Boolean).filter((part) => parseIds(part).length === 0);
       renderResults(results, invalid, Math.max(0, ids.length - 25));
       $("#watchForm").hidden = false;
       setStatus($("#watchStatus"), "", null);

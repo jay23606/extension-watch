@@ -2,9 +2,10 @@ import type { Assessment, Change, Manifest } from "./types.js";
 
 // One KV record per watchlist (key wl:<token>, metadata {lastCheck}) and one shared cache record per extension per day
 // (key ext:<id>). The 32-byte random token in the link is the only key to a watchlist; no personal data is stored.
-export interface Snapshot { id: string; manifest: Manifest | null; assessment: Assessment | null; error: string | null; checkedAt: string }
+/** `transient` marks failures worth retrying (Google 5xx, timeouts); a definitive answer (not listed, 404, unreadable) counts as a check. */
+export interface Snapshot { id: string; manifest: Manifest | null; assessment: Assessment | null; error: string | null; checkedAt: string; transient?: boolean }
 export type LoggedChange = Omit<Change, "kind"> & { kind: string; id: string; at: string };
-export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string }
+export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string; viewToken?: string }
 export interface Kv {
   get(k: string): Promise<string | null>;
   put(k: string, v: string, o?: { expirationTtl?: number; metadata?: unknown }): Promise<void>;
@@ -36,9 +37,24 @@ export async function save(kv: Kv, token: string, wl: Watchlist): Promise<void> 
 }
 
 export async function remove(kv: Kv, token: string): Promise<boolean> {
-  if (!validToken(token) || !(await kv.get(`wl:${token}`))) return false;
+  const wl = await load(kv, token);
+  if (!wl) return false;
   await kv.delete(`wl:${token}`);
+  if (wl.viewToken) await kv.delete(`vw:${wl.viewToken}`);
   return true;
+}
+
+/** Read-only share links map to the admin token; only the admin token can change or delete a list. */
+export async function resolveView(kv: Kv, viewToken: string): Promise<string | null> {
+  if (!validToken(viewToken)) return null;
+  return kv.get(`vw:${viewToken}`);
+}
+
+export async function ensureViewToken(kv: Kv, token: string, wl: Watchlist): Promise<string> {
+  if (wl.viewToken) return wl.viewToken;
+  wl.viewToken = newToken();
+  await kv.put(`vw:${wl.viewToken}`, token, { expirationTtl: 400 * 86400 }); // outlives the list; a stale view link resolves to 404
+  return wl.viewToken;
 }
 
 /** Watchlists due for a check (last check older than maxAgeMs), oldest first. Bounded by page count. */
@@ -65,7 +81,8 @@ export async function cachedSnapshot(kv: Kv, id: string, day: string): Promise<S
 }
 
 export async function cacheSnapshot(kv: Kv, snap: Snapshot, day: string): Promise<void> {
-  if (snap.manifest) await kv.put(`ext:${snap.id}`, JSON.stringify({ ...snap, day }), { expirationTtl: CACHE_TTL });
+  // Definitive failures are cached for the day too, so a removed extension is not downloaded again on every run.
+  if (!snap.transient) await kv.put(`ext:${snap.id}`, JSON.stringify({ ...snap, day }), { expirationTtl: CACHE_TTL });
 }
 
 /** Per-address daily counter for anonymous writes. Returns false when the limit is reached. */

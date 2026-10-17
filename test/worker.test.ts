@@ -66,12 +66,127 @@ test("reads mask the webhook and record the view; idle lists are not re-checked"
   globalThis.fetch = (async () => { fetched++; return new Response(null, { status: 204 }); }) as typeof fetch;
   try {
     const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+    const stored = JSON.parse(store.get("wl:" + token)!);
+    store.set("wl:" + token, JSON.stringify({ ...stored, webhook: null }));
     await mod.default.scheduled({}, env as never);
-    assert.equal(fetched, 0, "idle for more than 90 days: not re-checked");
+    assert.equal(fetched, 0, "no webhook and idle for more than 90 days: not re-checked");
+    store.set("wl:" + token, JSON.stringify(stored));
     const res = await mod.default.fetch(new Request("http://x/api/watchlists/" + token), env as never);
     const body = await res.json() as { webhook: string; webhookSet: boolean };
     assert.equal(body.webhookSet, true);
     assert.ok(!body.webhook.includes("secret"));
     assert.ok(JSON.parse(store.get("wl:" + token)!).viewedAt);
   } finally { globalThis.fetch = real; }
+});
+
+// In-memory KV with metadata, enough for the worker routes and the scheduler.
+function memKv() {
+  const store = new Map<string, { v: string; m?: unknown }>();
+  const kv = {
+    get: async (k: string) => store.get(k)?.v ?? null,
+    put: async (k: string, v: string, o?: { metadata?: unknown }) => { store.set(k, { v, m: o?.metadata }); },
+    delete: async (k: string) => { store.delete(k); },
+    list: async ({ prefix }: { prefix: string }) => ({ keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name, metadata: store.get(name)?.m })), list_complete: true }),
+  };
+  return { store, kv };
+}
+const jsonReq = (url: string, method: string, body?: unknown, ct = "application/json") =>
+  new Request(url, { method, headers: { "content-type": ct, "cf-connecting-ip": "7.7.7.7" }, body: body === undefined ? undefined : JSON.stringify(body) });
+const seeded = (token: string, over: Partial<ReturnType<typeof list>> = {}) => {
+  const base = list();
+  applySnapshots(base, [snap(man())], true);
+  const wl = { ...base, ...over };
+  return { wl, put: (kv: { put: (k: string, v: string, o?: { metadata?: unknown }) => Promise<void> }) => kv.put("wl:" + token, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } }) };
+};
+
+test("N1: alerts still go out when the change log is already full", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const token = "B".repeat(43);
+  const full = Array.from({ length: 200 }, () => ({ kind: "version_changed", value: "1 to 1", severity: "low" as const, id: "a".repeat(32), at: "2026-01-01T00:00:00Z" }));
+  const { wl, put } = seeded(token, { webhook: "https://hooks.slack.com/services/x", lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() });
+  wl.changes = full;
+  await put(kv);
+  const posts: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (String(url).includes("hooks.slack.com")) { posts.push(String(init?.body)); return new Response("ok"); }
+    const { manifestCrxForTest } = await import("./helpers.js");
+    return new Response(manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "2", permissions: ["storage", "cookies"] }) as unknown as BodyInit, { status: 200 });
+  }) as typeof fetch;
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  assert.equal(posts.length, 1);
+  assert.match(posts[0]!, /cookies/);
+});
+
+test("N2/N3: a list of removed extensions counts as checked, is cached, and cannot starve other lists", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const old = "2026-01-01T00:00:00Z";
+  for (let n = 0; n < 3; n++) {
+    const wl = { ...list(), ids: Array.from({ length: 50 }, (_, i) => String.fromCharCode(97 + n) + "b".repeat(29) + String.fromCharCode(97 + (i % 16)) + String.fromCharCode(97 + Math.floor(i / 16))), lastCheck: old, viewedAt: new Date().toISOString() };
+    await kv.put("wl:" + String(n).repeat(43), JSON.stringify(wl), { metadata: { lastCheck: old } });
+  }
+  const customer = "C".repeat(43);
+  await kv.put("wl:" + customer, JSON.stringify({ ...list(), ids: ["p".repeat(32)], lastCheck: "2026-01-02T00:00:00Z", viewedAt: new Date().toISOString() }), { metadata: { lastCheck: "2026-01-02T00:00:00Z" } });
+  let downloads = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { downloads++; return new Response(null, { status: 204 }); }) as typeof fetch;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  try {
+    await mod.default.scheduled({}, env as never);
+    assert.ok(downloads <= 120, `budget is a hard limit, got ${downloads}`);
+    for (let r = 0; r < 3; r++) await mod.default.scheduled({}, env as never);
+  } finally { globalThis.fetch = real; }
+  assert.notEqual(JSON.parse(store.get("wl:" + customer)!.v).lastCheck, "2026-01-02T00:00:00Z", "the customer list was checked");
+  assert.notEqual(JSON.parse(store.get("wl:" + "0".repeat(43))!.v).lastCheck, old, "a list of removed extensions counts as checked");
+});
+
+test("N5: a text/plain request that mentions application/json is rejected", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const res = await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "a".repeat(32) }, "text/plain; application/json"), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never);
+  assert.equal(res.status, 415);
+});
+
+test("N6: the read-only link shows the list but cannot change alerts or delete it", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const admin = "D".repeat(43);
+  const { put } = seeded(admin, { webhook: "https://hooks.slack.com/services/T/B/SECRET" });
+  await put(kv);
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never;
+  const a = await (await mod.default.fetch(jsonReq("http://x/api/watchlists/" + admin, "GET"), env)).json() as { role: string; viewToken: string; webhook: string };
+  assert.equal(a.role, "admin");
+  assert.equal(a.webhook, "https://hooks.slack.com/...");
+  const v = await (await mod.default.fetch(jsonReq("http://x/api/watchlists/" + a.viewToken, "GET"), env)).json() as { role: string; webhook: unknown; viewToken?: string };
+  assert.equal(v.role, "viewer");
+  assert.equal(v.webhook, null);
+  assert.equal(v.viewToken, undefined);
+  assert.equal((await mod.default.fetch(jsonReq("http://x/api/watchlists/" + a.viewToken, "PUT", { webhook: "https://evil.example/x" }), env)).status, 404);
+  assert.equal((await mod.default.fetch(jsonReq("http://x/api/watchlists/" + a.viewToken, "DELETE"), env)).status, 404);
+  assert.equal((await mod.default.fetch(jsonReq("http://x/api/watchlists/" + admin, "DELETE"), env)).status, 200);
+  assert.equal((await mod.default.fetch(jsonReq("http://x/api/watchlists/" + a.viewToken, "GET"), env)).status, 404);
+});
+
+test("N7: a list with a webhook keeps being checked after 90 days without a page view", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "E".repeat(43);
+  const { put } = seeded(token, { webhook: "https://hooks.slack.com/services/x", lastCheck: "2026-01-01T00:00:00Z", viewedAt: "2025-01-01T00:00:00Z" });
+  await put(kv);
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => String(url).includes("hooks.slack.com") ? new Response("ok") : new Response(null, { status: 204 })) as typeof fetch;
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  assert.notEqual(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z");
+});
+
+test("N8: the burst limit binding answers 429 on writes", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  let n = 0;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, WRITE_LIMIT: { limit: async () => ({ success: ++n <= 2 }) } } as never;
+  const statuses = [];
+  for (let i = 0; i < 3; i++) statuses.push((await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "x" }), env)).status);
+  assert.deepEqual(statuses, [400, 400, 429]);
 });
