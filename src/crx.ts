@@ -93,9 +93,11 @@ class Inflater {
   private bitBuf = 0;
   private bitCount = 0;
   private output: number[] = [];
+  private readonly limit: number;
 
-  constructor(input: Uint8Array) {
+  constructor(input: Uint8Array, limit = MAX_CRX_BYTES) {
     this.input = input;
+    this.limit = limit;
   }
 
   run(): Uint8Array {
@@ -149,6 +151,7 @@ class Inflater {
     const length = this.read16();
     const nlength = this.read16();
     if ((length ^ 0xffff) !== nlength) throw new FetchError(400, "Corrupt deflate stored block");
+    if (this.output.length + length > this.limit) throw new FetchError(400, "Output too large");
     for (let i = 0; i < length; i++) this.output.push(this.input[this.inputPos++] ?? 0);
   }
 
@@ -160,7 +163,7 @@ class Inflater {
     let sym = this.decode(lit);
     // Every symbol adds at least one output byte, and output is capped, so MAX_CRX_BYTES + 1 iterations bound the loop.
     for (let n = 0; sym !== 256; n++) {
-      if (n > MAX_CRX_BYTES || this.output.length > MAX_CRX_BYTES) throw new FetchError(400, "Output too large");
+      if (n > MAX_CRX_BYTES || this.output.length > this.limit) throw new FetchError(400, "Output too large");
       if (sym < 0) throw new FetchError(400, "Corrupt deflate data");
       if (sym < 256) {
         this.output.push(sym);
@@ -208,8 +211,8 @@ class Inflater {
   }
 }
 
-function inflateRaw(data: Uint8Array): Uint8Array {
-  return new Inflater(data).run();
+function inflateRaw(data: Uint8Array, limit = MAX_CRX_BYTES): Uint8Array {
+  return new Inflater(data, limit).run();
 }
 
 export function parseManifestJson(data: Uint8Array): Record<string, unknown> {
@@ -316,6 +319,8 @@ const CAPTURE_BUDGET = 24 * 1024 * 1024;
 const MAX_CAPTURES = 400;
 const MAX_STREAM_BYTES = 250 * 1024 * 1024;
 const HEAD_BYTES = 64 * 1024;
+/** manifest.json and messages.json are kilobytes; a padded entry that inflates past this is refused. */
+const ENTRY_OUTPUT_LIMIT = 4 * 1024 * 1024;
 const CARRY_BYTES = 128;
 const LOCALE_NAME = /^_locales\/[A-Za-z_-]{2,12}\/messages\.json$/;
 
@@ -335,6 +340,8 @@ function parseDirectory(cd: Uint8Array, count: number): Map<string, DirEntry> {
     if (u32le(cd, p) !== 0x02014b50) throw new FetchError(400, "Invalid ZIP central directory");
     const nameLen = u16le(cd, p + 28);
     const name = decodeUtf8(cd.subarray(p + 46, p + 46 + nameLen));
+    // Two index entries for manifest.json are ambiguous (unzip tools disagree on which wins): refuse the package.
+    if (map.has(name) && name === "manifest.json") throw new FetchError(422, "Package has two manifest.json entries");
     if (!map.has(name)) map.set(name, { local: u32le(cd, p + 42), size: u32le(cd, p + 20), method: u16le(cd, p + 10) });
     p += 46 + nameLen + u16le(cd, p + 30) + u16le(cd, p + 32);
   }
@@ -352,7 +359,7 @@ async function readIndexed(read: Reader, zipStart: number, name: string, e: DirE
   let data = head.subarray(start, start + e.size);
   if (data.length < e.size) data = await read(from + start, e.size);
   if (data.length < e.size) throw new FetchError(422, "Could not read the whole manifest entry");
-  return inflateEntry(data, e.method);
+  return inflateEntry(data, e.method, ENTRY_OUTPUT_LIMIT);
 }
 
 async function manifestFromIndex(zipStart: number, tail: Uint8Array, tailStart: number, read: Reader, id: string, fetchFn?: typeof fetch): Promise<Manifest> {
@@ -380,9 +387,9 @@ async function manifestFromIndex(zipStart: number, tail: Uint8Array, tailStart: 
   return manifest;
 }
 
-function inflateEntry(data: Uint8Array, method: number): Uint8Array {
+function inflateEntry(data: Uint8Array, method: number, limit = MAX_CRX_BYTES): Uint8Array {
   if (method === 0) return data;
-  if (method === 8) return inflateRaw(data);
+  if (method === 8) return inflateRaw(data, limit);
   throw new FetchError(400, "Unsupported compression method");
 }
 
@@ -408,7 +415,7 @@ interface Capture extends Segment { cap: number }
 class Capturer {
   readonly captures: Capture[] = [];
   private readonly seen = new Set<number>();
-  private budget = CAPTURE_BUDGET;
+  private used = 0; // bytes actually held; decoy headers that end quickly cost little
   private carry = new Uint8Array(0);
 
   feed(chunk: Uint8Array, chunkStart: number): void {
@@ -445,7 +452,9 @@ class Capturer {
     if (c && rest) rest(c);
   }
 
-  private append(c: Capture, part: Uint8Array): void {
+  private append(c: Capture, whole: Uint8Array): void {
+    const part = whole.subarray(0, Math.max(0, c.cap - c.len)); // never past the capture's cap (P4)
+    if (part.length === 0) return;
     if (c.len + part.length > c.bytes.length) {
       let size = c.bytes.length * 2;
       for (let k = 0; k < 32 && size < c.len + part.length; k++) size *= 2;
@@ -455,6 +464,7 @@ class Capturer {
     }
     c.bytes.set(part, c.len);
     c.len += part.length;
+    this.used += part.length;
   }
 
   /** A new local header at `abs` ends every capture that started before it. */
@@ -475,9 +485,8 @@ class Capturer {
     const name = decodeUtf8(buf.subarray(i + 30, i + 30 + nameLen));
     const cap = name === "manifest.json" ? CAPTURE_MANIFEST : LOCALE_NAME.test(name) ? CAPTURE_LOCALE : 0;
     const abs = base + i;
-    if (cap === 0 || this.seen.has(abs) || this.budget < cap || this.captures.length >= MAX_CAPTURES) return null;
+    if (cap === 0 || this.seen.has(abs) || this.used + cap > CAPTURE_BUDGET || this.captures.length >= MAX_CAPTURES) return null;
     this.seen.add(abs);
-    this.budget -= cap;
     const c: Capture = { start: abs, bytes: new Uint8Array(Math.min(cap, 16 * 1024)), len: 0, cap };
     this.captures.push(c);
     this.append(c, buf.subarray(i, Math.min(end, i + cap)));

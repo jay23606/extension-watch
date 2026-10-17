@@ -13,8 +13,11 @@ const NOT_LISTED = "Not on the Chrome Web Store";
 const DAY_MS = 86_400_000;
 /** One cron run (every 10 minutes) downloads at most this many packages: about 5,700 a day, a few seconds of CPU per run. */
 const FETCH_BUDGET = 40;
-/** One run touches at most this many lists, which keeps KV operations per invocation under Cloudflare's 1,000 limit. */
+/** One run touches at most this many lists. */
 const MAX_LISTS_PER_RUN = 150;
+/** KV operations one run may spend (Cloudflare allows 1,000 per invocation); the rest wait for the next run. */
+const KV_BUDGET = 800;
+const POSTPONED = "Check postponed to the next run.";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -31,16 +34,21 @@ async function fresh(id: string): Promise<Snapshot> {
 }
 
 /** Each extension is downloaded at most once a day, shared by every watchlist (KV cache) and within one run (memo). */
-function snapshotter(kv: Kv | null, memo: Map<string, Promise<Snapshot>>, budget: { left: number }) {
+type Budget = { left: number; kv: number };
+
+function snapshotter(kv: Kv | null, memo: Map<string, Promise<Snapshot>>, budget: Budget) {
   return (id: string): Promise<Snapshot> => {
     const known = memo.get(id);
     if (known) return known;
     const job = (async () => {
+      if (budget.kv <= 2) return { id, manifest: null, assessment: null, error: POSTPONED, checkedAt: new Date().toISOString(), transient: true };
+      budget.kv -= 1;
       const hit = kv ? await cachedSnapshot(kv, id, today()) : null;
       // Grades are recomputed from the cached manifest, so a rule change applies at once.
       if (hit) return hit.manifest ? { ...hit, assessment: assess(hit.manifest) } : hit;
-      if (budget.left <= 0) return { id, manifest: null, assessment: null, error: "Check postponed to the next run.", checkedAt: new Date().toISOString(), transient: true };
+      if (budget.left <= 0) return { id, manifest: null, assessment: null, error: POSTPONED, checkedAt: new Date().toISOString(), transient: true };
       budget.left--;
+      budget.kv -= 1;
       const snap = await fresh(id);
       if (kv) await cacheSnapshot(kv, snap, today());
       return snap;
@@ -88,26 +96,39 @@ function apply(wl: Watchlist, snaps: Snapshot[], initial: boolean): void {
       wl.snapshots[snap.id] = { ...prev, error: NOT_LISTED, checkedAt: now };
     } else {
       if (!snap.transient) ok++; // a definitive answer (404, unreadable package) is a completed check
+      // A package that could be read before and cannot be read now is itself a signal: log it and alert.
+      if (!initial && !snap.transient && prev?.manifest && prev.error !== snap.error) {
+        wl.changes.push({ kind: "unreadable", value: snap.error ?? "unreadable", severity: "high", id: snap.id, at: now });
+      }
       wl.snapshots[snap.id] = prev ? { ...prev, error: snap.error, checkedAt: snap.transient ? prev.checkedAt : now } : snap;
     }
   }
-  if (ok > 0 || initial) wl.lastCheck = now;
+  // A list stays due until every extension in it got an answer this round (P1: no extension is skipped day after day).
+  const postponed = snaps.some((s) => s.error === POSTPONED);
+  if ((ok > 0 || initial) && !postponed) wl.lastCheck = now;
 }
 
 async function recheck(kv: Kv, token: string, get: (id: string) => Promise<Snapshot>, origin: string): Promise<void> {
   const wl = await load(kv, token);
   if (!wl) return;
-  // No webhook and not opened for 90 days: stop checking, so the KV expiry (renewed only by saves) removes it.
-  // Lists with a webhook stay active: the team reads them in chat.
-  if (!wl.webhook && Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > IDLE_TTL * 1000) return;
+  // Not opened for 90 days (365 with a webhook, since that team reads it in chat): stop checking, so the KV expiry
+  // (renewed only by saves) removes it.
+  const idleLimit = (wl.webhook ? 365 * 86400 : IDLE_TTL) * 1000;
+  if (Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > idleLimit) return;
   const seen = wl.changes.length;
   apply(wl, await scanMany(wl.ids, get), false);
   // Take the new changes before save() trims the log to its last 200 entries.
   const fresh = alertable(wl.changes.slice(seen));
   if (fresh.length) {
-    const sent = await sendAlert(wl, fresh, `${origin}/w/${wl.viewToken ?? token}`);
+    const viewToken = await ensureViewToken(kv, token, wl);
+    const sent = await sendAlert(wl, fresh, `${origin}/w/${viewToken}`); // never the admin link: chat channels are shared
     if (sent.ok) wl.viewedAt = new Date().toISOString(); // a team that reads alerts in Slack is an active team
   }
+  // The admin may have deleted the list or changed its webhook while this check ran (P7): honour that.
+  const current = await load(kv, token);
+  if (!current) return;
+  wl.webhook = current.webhook;
+  wl.name = current.name;
   await save(kv, token, wl);
 }
 
@@ -128,7 +149,7 @@ const routes: Record<string, Handler> = {
     if (!(await allow(env.WATCHLISTS, ipOf(req), "scan", 200, today()))) throw new FetchError(429, "Daily scan limit reached for this address. Try again tomorrow.");
     const { ids, invalid, dropped } = parseIds((await json<{ ids?: unknown }>(req)).ids, MAX_SCAN);
     if (ids.length === 0) throw new FetchError(400, "Paste at least one Chrome extension ID or Web Store link.");
-    const get = snapshotter(env.WATCHLISTS, new Map(), { left: MAX_SCAN });
+    const get = snapshotter(env.WATCHLISTS, new Map(), { left: MAX_SCAN, kv: 4 * MAX_SCAN });
     return Response.json({ results: await scanMany(ids, get), invalid, dropped });
   },
   "POST /api/watchlists": async (req, env) => {
@@ -138,7 +159,8 @@ const routes: Record<string, Handler> = {
     if (ids.length === 0) throw new FetchError(400, "Add at least one extension.");
     const token = newToken(); const now = new Date().toISOString();
     const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now };
-    apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS })), true); // baseline: no "new" noise
+    apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS, kv: 4 * MAX_IDS })), true); // baseline: no "new" noise
+    await ensureViewToken(env.WATCHLISTS, token, wl);
     await save(env.WATCHLISTS, token, wl);
     return Response.json({ token, url: `/w/${token}`, dropped });
   },
@@ -178,7 +200,9 @@ const routes: Record<string, Handler> = {
     if (!wl.webhook) throw new FetchError(400, "Save a webhook URL first.");
     const id = wl.ids[0] ?? "";
     const sample = [{ kind: "permission_added", value: "cookies (test alert, not a real change)", severity: "high" as const, id, at: new Date().toISOString() }];
-    const res = await sendAlert(wl, sample, `${new URL(req.url).origin}/w/${token}`);
+    const viewToken = await ensureViewToken(env.WATCHLISTS, token, wl);
+    await save(env.WATCHLISTS, token, wl);
+    const res = await sendAlert(wl, sample, `${new URL(req.url).origin}/w/${viewToken}`);
     return Response.json({ sent: res.ok, status: res.status });
   },
   "GET /api/rules": async () => Response.json({ rules: RULES }),
@@ -189,11 +213,12 @@ export default {
     return secure(await route(request, env));
   },
   async scheduled(_event: unknown, env: Env & { ORIGIN?: string }): Promise<void> {
-    const budget = { left: FETCH_BUDGET };
+    const budget: Budget = { left: FETCH_BUDGET, kv: KV_BUDGET };
     const get = snapshotter(env.WATCHLISTS, new Map(), budget);
     const origin = env.ORIGIN ?? "https://extension-watch.lipmichal.workers.dev";
     for (const token of (await dueTokens(env.WATCHLISTS, DAY_MS - 3_600_000)).slice(0, MAX_LISTS_PER_RUN)) {
-      if (budget.left <= 0) break;
+      if (budget.left <= 0 || budget.kv <= 10) break;
+      budget.kv -= 4; // load, re-load before save, save, and the view-token write when one is created
       await recheck(env.WATCHLISTS, token, get, origin);
     }
   },

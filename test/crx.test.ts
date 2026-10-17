@@ -521,3 +521,24 @@ test("headers that straddle stream chunk boundaries are found, for every chunk s
     assert.equal(m.name, "Bonjour", `chunk size ${size}`);
   }
 });
+
+test("P4: a header cut at a chunk edge followed by a large chunk is read", async () => {
+  const zip = buildZip([
+    { name: "a.bin", data: new Uint8Array(100000).fill(1), method: 0 },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Edge", version: "1" }) },
+    { name: "c.bin", data: new Uint8Array(2.2 * 1024 * 1024).fill(3), method: 0 },
+  ]);
+  const body = crx3(zip);
+  const at = Buffer.from(body).indexOf(Buffer.from("manifest.json")) - 30;
+  const cut = at + 20;
+  const fake = (async () => new Response(new ReadableStream({ start(c) { c.enqueue(body.subarray(0, cut)); c.enqueue(body.subarray(cut, cut + 1_500_000)); c.enqueue(body.subarray(cut + 1_500_000)); c.close(); } }), { status: 200 })) as unknown as typeof fetch;
+  assert.equal((await fetchManifest(ID, fake)).name, "Edge");
+});
+
+test("P11: two central-directory entries named manifest.json make the package unreadable", async () => {
+  const zip = buildZip([
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Benign", version: "1" }) },
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Evil", version: "1", permissions: ["debugger"] }) },
+  ]);
+  await assert.rejects(fetchManifest(ID, chunkedFetch(crx3(zip), { n: 0 })), /two manifest\.json/);
+});

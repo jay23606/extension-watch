@@ -28,7 +28,7 @@ test("a failed check does not move 'last checked' and keeps the last good snapsh
   const wl = list();
   applySnapshots(wl, [snap(man())], true);
   const before = wl.lastCheck;
-  applySnapshots(wl, [snap(null, "Download failed: HTTP 503")], false);
+  applySnapshots(wl, [{ ...snap(null, "Download failed: HTTP 503"), transient: true }], false);
   assert.equal(wl.lastCheck, before);
   assert.equal(wl.changes.length, 0);
   assert.equal(wl.snapshots["a".repeat(32)]?.error, "Download failed: HTTP 503");
@@ -173,7 +173,7 @@ test("N7: a list with a webhook keeps being checked after 90 days without a page
   const mod = await import("../src/worker.js");
   const { kv, store } = memKv();
   const token = "E".repeat(43);
-  const { put } = seeded(token, { webhook: "https://hooks.slack.com/services/x", lastCheck: "2026-01-01T00:00:00Z", viewedAt: "2025-01-01T00:00:00Z" });
+  const { put } = seeded(token, { webhook: "https://hooks.slack.com/services/x", lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date(Date.now() - 200 * 86400000).toISOString() });
   await put(kv);
   const real = globalThis.fetch;
   globalThis.fetch = (async (url: string) => String(url).includes("hooks.slack.com") ? new Response("ok") : new Response(null, { status: 204 })) as typeof fetch;
@@ -189,4 +189,84 @@ test("N8: the burst limit binding answers 429 on writes", async () => {
   const statuses = [];
   for (let i = 0; i < 3; i++) statuses.push((await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "x" }), env)).status);
   assert.deepEqual(statuses, [400, 400, 429]);
+});
+
+
+test("P3: an update that can no longer be read is logged as a high-severity change", () => {
+  const wl = list();
+  applySnapshots(wl, [snap(man())], true);
+  applySnapshots(wl, [snap(null, "Invalid ZIP central directory")], false);
+  applySnapshots(wl, [snap(null, "Invalid ZIP central directory")], false);
+  assert.deepEqual(wl.changes.map((c) => [c.kind, c.severity]), [["unreadable", "high"]]);
+});
+
+test("P1: a list stays due until every extension got an answer, then completes on the next run", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "F".repeat(43);
+  const ids = Array.from({ length: 50 }, (_, i) => "k".repeat(30) + String.fromCharCode(97 + (i % 16)) + String.fromCharCode(97 + Math.floor(i / 16)));
+  const wl = { ...list(), ids, lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() };
+  await kv.put("wl:" + token, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
+  const { manifestCrxForTest } = await import("./helpers.js");
+  const body = manifestCrxForTest({ manifest_version: 3, name: "X", version: "1", permissions: ["storage"] }) as unknown as BodyInit;
+  let downloads = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { downloads++; return new Response(body, { status: 200 }); }) as typeof fetch;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never;
+  try {
+    await mod.default.scheduled({}, env);
+    assert.equal(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z", "40 of 50 done: still due");
+    await mod.default.scheduled({}, env);
+  } finally { globalThis.fetch = real; }
+  const after = JSON.parse(store.get("wl:" + token)!.v);
+  assert.notEqual(after.lastCheck, "2026-01-01T00:00:00Z");
+  assert.equal(Object.values(after.snapshots as Record<string, { manifest: unknown }>).filter((x) => x.manifest).length, 50);
+  assert.equal(downloads, 50);
+});
+
+test("P2: the test alert carries the read-only link, never the admin link", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const admin = "G".repeat(43);
+  const { put } = seeded(admin, { webhook: "https://hooks.slack.com/services/x" });
+  await put(kv);
+  const bodies: string[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (_u: string, init?: RequestInit) => { bodies.push(String(init?.body)); return new Response("ok"); }) as typeof fetch;
+  try {
+    const res = await mod.default.fetch(jsonReq("http://x/api/test-alert", "POST", { token: admin }), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never);
+    assert.equal(res.status, 200);
+  } finally { globalThis.fetch = real; }
+  assert.ok(!bodies[0]!.includes(admin), "admin token must not be posted to chat");
+  assert.match(bodies[0]!, /\/w\/[A-Za-z0-9_-]{43}/);
+});
+
+
+test("P8: a list with a webhook stops being checked after 365 days without a view", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "H".repeat(43);
+  const { put } = seeded(token, { webhook: "https://hooks.slack.com/services/x", lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date(Date.now() - 400 * 86400000).toISOString() });
+  await put(kv);
+  let fetched = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { fetched++; return new Response(null, { status: 204 }); }) as typeof fetch;
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  assert.equal(fetched, 0);
+  assert.equal(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z");
+});
+
+test("P7: a webhook removed while a check runs stays removed", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "J".repeat(43);
+  const { put } = seeded(token, { webhook: "https://hooks.example.com/old", lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() });
+  await put(kv);
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const wl = JSON.parse(store.get("wl:" + token)!.v); wl.webhook = null; store.set("wl:" + token, { v: JSON.stringify(wl) }); // admin turns alerts off mid-check
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  assert.equal(JSON.parse(store.get("wl:" + token)!.v).webhook, null);
 });

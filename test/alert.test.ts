@@ -9,7 +9,7 @@ test("only public https host names are accepted as webhooks", () => {
   assert.equal(webhookProblem("https://hooks.slack.com/services/T/B/x"), null);
   assert.equal(webhookProblem("https://discord.com/api/webhooks/1/abc"), null);
   for (const bad of ["http://hooks.slack.com/x", "https://localhost/x", "https://192.168.1.4/x", "https://172.16.0.1/x", "https://0.0.0.0/x",
-    "https://[::1]/x", "https://metadata.google.internal/x", "https://localtest.me/x", "https://a:b@example.com/x", "https://example.com:8443/x", "not a url"]) {
+    "https://[::1]/x", "https://metadata.google.internal/x", "https://localhost./x", "https://lvh.me/x", "https://localtest.me/x", "https://a:b@example.com/x", "https://example.com:8443/x", "not a url"]) {
     assert.notEqual(webhookProblem(bad), null, bad);
   }
 });

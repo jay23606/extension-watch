@@ -58,7 +58,7 @@ export async function ensureViewToken(kv: Kv, token: string, wl: Watchlist): Pro
 }
 
 /** Watchlists due for a check (last check older than maxAgeMs), oldest first. Bounded by page count. */
-export async function dueTokens(kv: Kv, maxAgeMs: number, now = Date.now(), maxPages = 20): Promise<string[]> {
+export async function dueTokens(kv: Kv, maxAgeMs: number, now = Date.now(), maxPages = 50): Promise<string[]> {
   const due: Array<[string, number]> = [];
   let cursor: string | undefined;
   for (let page = 0; page < maxPages; page++) {

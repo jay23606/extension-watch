@@ -291,3 +291,10 @@ test("RULES has unique codes, positive points, and a group and severity for ever
     assert.equal(r.severity, severityFor(r.points));
   }
 });
+
+
+test("P9: host wildcards across a whole top-level domain count as broad", async () => {
+  const { isBroad } = await import("../src/risk.js");
+  for (const p of ["*://*.com/*", "https://*.co.uk/*", "*://*.COM/*", "https://*.io/*"]) assert.equal(isBroad(p), true, p);
+  for (const p of ["https://*.google.com/*", "https://mail.google.com/*", "*://*.deepl.com/*"]) assert.equal(isBroad(p), false, p);
+});

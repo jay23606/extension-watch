@@ -70,8 +70,14 @@ const PERMISSION_POINTS: Record<string, number> = {
 };
 
 /** Chrome ignores the path of a host permission, so any scheme with a bare path grants every site. */
+/** Every site, or every site under a whole top-level domain such as *.com or *.co.uk. */
 export function isBroad(pattern: string): boolean {
-  return pattern === "<all_urls>" || /^(\*|https?|wss?|file):\/\/\*\//.test(pattern);
+  const p = pattern.trim().toLowerCase();
+  if (p === "<all_urls>" || /^(\*|https?|wss?|file):\/\/\*\//.test(p)) return true;
+  const host = /^(?:\*|https?|wss?):\/\/\*\.([^/:]+)/.exec(p)?.[1];
+  if (!host) return false;
+  const labels = host.replace(/\.$/, "").split(".");
+  return labels.length === 1 || (labels.length === 2 && labels[0]!.length <= 3 && labels[1]!.length === 2);
 }
 
 /** True when the CSP allows 'unsafe-eval' (not 'wasm-unsafe-eval') or remote script hosts. */

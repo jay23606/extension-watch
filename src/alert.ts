@@ -19,9 +19,9 @@ export function webhookProblem(raw: string): string | null {
   if (u.protocol !== "https:") return "Use an https webhook URL.";
   if (u.username || u.password) return "Remove the user name and password from the URL.";
   if (u.port !== "") return "Use the standard https port.";
-  const host = u.hostname.toLowerCase();
+  const host = u.hostname.toLowerCase().replace(/\.+$/, "");
   if (/^[\d.]+$/.test(host) || host.startsWith("[")) return "Use a host name, not an IP address.";
-  if (!host.includes(".") || /(^|\.)(localhost|local|internal|intranet|lan|home|corp|localtest\.me|nip\.io|sslip\.io)$/.test(host)) return "Use a public webhook host.";
+  if (!host.includes(".") || /(^|\.)(localhost|local|internal|intranet|lan|home|corp|localtest\.me|lvh\.me|vcap\.me|nip\.io|sslip\.io|xip\.io|traefik\.me)$/.test(host)) return "Use a public webhook host.";
   return null;
 }
 

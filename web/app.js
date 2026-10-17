@@ -458,7 +458,7 @@ function renderRules(rules) {
   const table = el("table", "rules-table");
   const thead = el("thead");
   const headRow = el("tr");
-  for (const h of ["Rule", "Severity", "Points"]) headRow.appendChild(el("th", null, h));
+  for (const h of ["Rule", "Group (counts once)", "Severity", "Points"]) headRow.appendChild(el("th", null, h));
   thead.appendChild(headRow);
   table.appendChild(thead);
   const tbody = el("tbody");
@@ -466,6 +466,7 @@ function renderRules(rules) {
     const tr = el("tr");
     const name = r.title || r.name || r.code || "";
     tr.appendChild(el("td", "rules__name", name));
+    tr.appendChild(el("td", "rules__group mono", String(r.group || "").replace(/_/g, " ")));
     const sev = el("td");
     sev.appendChild(severityTag(r.severity));
     tr.appendChild(sev);
