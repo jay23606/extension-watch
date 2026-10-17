@@ -1,5 +1,7 @@
 # Extension Watch: specification (Galuxium Nexus V2 hackathon, SaaS)
 
+_Original build spec. The README describes the current version._
+
 Problem: every company runs dozens of Chrome extensions it never reviewed. An extension that was harmless when installed can
 gain "read all your data on all websites" in a silent update. Security teams have no cheap way to see which extensions their
 staff use, what each one can do, and when that changes.
@@ -10,7 +12,7 @@ risk with a transparent rule set, and keeps a snapshot. A daily check compares n
 an alert when an update adds permissions or site access. Built by Michael Lip, who maintains 108 Chrome extensions with
 more than 150,000 users.
 
-Runtime: Cloudflare Workers + Workers KV (one record per watchlist) + a daily Cron Trigger. TypeScript ESM. No paid services. Node 24 toolchain.
+Runtime: Cloudflare Workers + Workers KV (one record per watchlist, one shared record per extension per day) + a Cron Trigger every 10 minutes that re-checks lists due for their daily check. TypeScript ESM. No paid services. Node 24 toolchain.
 Tests never hit the network: fake fetch and fixture packages.
 `PATH=$HOME/paybox-hackathon-2026-10-17/.node/node-v24.21.0-darwin-arm64/bin:$PATH npx tsx --test test/<file>.test.ts`.
 
@@ -39,7 +41,7 @@ export class FetchError extends Error { constructor(public status: number, messa
 ### CRX (W1)
 - Download: GET `https://clients2.google.com/service/update2/crx?response=redirect&prodversion=141.0.0.0&acceptformat=crx2,crx3&x=id%3D<ID>%26uc`
   (follow redirects). HTTP 204 or an empty body means the extension is not on the Web Store: throw FetchError(404, "Not on the Chrome Web Store").
-  Timeout 8 s. Max 20 MB.
+  Timeout 8 s. Stream the package and stop after manifest.json and the locale file (8 MB scan window); use range requests when Google honours them.
 - CRX3/CRX2: find the ZIP inside (CRX3 header: "Cr24", version 3, header length at bytes 8..11; ZIP starts at 12 + header length; CRX2: 16 + pubkey len + sig len).
   Read the ZIP central directory and inflate ONLY manifest.json and, when needed, _locales/<default_locale>/messages.json (and en as fallback),
   using `DecompressionStream("deflate-raw")` (available in Workers and Node 24). No zip library.
