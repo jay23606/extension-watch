@@ -16,7 +16,7 @@ Every company runs dozens of browser extensions that nobody reviewed. Extensions
 4. "Watch this list" saves a private link. Every day it reads every extension again and records each change: a permission or site access added, content scripts that reach new sites, a looser script policy, updates moved off the Web Store, a jump in the access score, a new version, an extension pulled from the store.
 5. Add a Slack or Discord webhook (or any https endpoint that takes JSON) and changes of medium severity or higher arrive as one message after each check.
 
-The grade measures access, not intent. A password manager needs to read every page, so it grades F, and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
+The grade measures access, not intent. A password manager needs to read every page, so it grades high (Bitwarden C 46, 1Password F 97 when checked on 18 October 2026), and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
 
 ## Screenshots
 
@@ -108,7 +108,7 @@ The cost to serve a watchlist is at most one streamed download per extension per
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npx tsx --test test/*.test.ts                 # 99 tests, no network
+npx tsx --test test/*.test.ts                 # 100 tests, no network
 ```
 
 ## License
