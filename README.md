@@ -31,6 +31,28 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 - Each extension is downloaded at most once a day, whatever the number of watchlists that contain it. In a test with 600 watchlists sharing one extension, one cron run checked all 600 with 1 download.
 - Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50. Each address may run 200 scans and create 20 watchlists a day.
 
+## Data model (Workers KV)
+
+| Key | Value | Expiry |
+|---|---|---|
+| `wl:<token>` | `{ name, ids[], snapshots{id: {manifest, assessment, error, checkedAt}}, changes[], createdAt, lastCheck, viewedAt, webhook }`, with `{ lastCheck }` as key metadata so the scheduler can pick due lists from a listing alone | 90 days, renewed by every save |
+| `ext:<extension id>` | The day's snapshot of one extension, shared by every watchlist | 3 days |
+| `rl:<action>:<day>:<address>` | Daily counter for scans, new watchlists and test alerts | 2 days |
+
+A change is `{ kind, value, severity, id, at }`. The change log keeps the last 200 entries.
+
+## API
+
+| Method and path | Purpose |
+|---|---|
+| `POST /api/scan` `{ ids }` | Grade up to 25 extensions |
+| `POST /api/watchlists` `{ name, ids }` | Create a watchlist (up to 50 extensions); returns the private token |
+| `GET /api/watchlists/<token>` | Read a watchlist (the webhook is masked) |
+| `PUT /api/watchlists/<token>` `{ webhook }` | Set or clear the alert webhook |
+| `DELETE /api/watchlists/<token>` | Delete a watchlist |
+| `POST /api/test-alert` `{ token }` | Send a labelled test message to the saved webhook |
+| `GET /api/rules` | The full points table |
+
 ## Methodology
 
 The full points table is public at `/api/rules` and on the Methodology page. Examples:
