@@ -471,3 +471,27 @@ test("manifest parser ignores a commented-out default_locale (sparse and full pa
   const src = '\uFEFF{\n  // "default_locale": "fr",\n  "default_locale": "de", "name": "__MSG_n__", "version": "1", "manifest_version": 3\n}';
   assert.equal(parseManifestJson(new TextEncoder().encode(src)).default_locale, "de");
 });
+
+test("streams Web Store layout: data-descriptor entries, manifest not first, name from the store title", async () => {
+  const { fetchManifest } = await import("../src/crx.js");
+  const local = (name: string, data: Buffer, desc: boolean) => {
+    const n = Buffer.from(name); const h = Buffer.alloc(30);
+    h.writeUInt32LE(0x04034b50, 0); h.writeUInt16LE(20, 4); h.writeUInt16LE(desc ? 0x0808 : 0, 6); h.writeUInt16LE(8, 8);
+    h.writeUInt32LE(desc ? 0 : data.length, 18); h.writeUInt16LE(n.length, 26);
+    const dd = Buffer.alloc(desc ? 16 : 0); if (desc) dd.writeUInt32LE(0x08074b50, 0);
+    return Buffer.concat([h, n, data, dd]);
+  };
+  const man = deflateRawSync(Buffer.from(JSON.stringify({ manifest_version: 3, name: "__MSG_appName__", version: "9.1", default_locale: "en", permissions: ["storage"] })));
+  const crx = Buffer.alloc(12); crx.write("Cr24", 0); crx.writeUInt32LE(3, 4); crx.writeUInt32LE(0, 8);
+  const body = Buffer.concat([crx, local("_locales/", deflateRawSync(Buffer.alloc(0)), true), local("manifest.json", man, true), local("filler.bin", Buffer.alloc(9 * 1024 * 1024, 7), false)]);
+  let read = 0;
+  const fake = (async (url: string) => {
+    if (String(url).includes("chromewebstore.google.com")) return new Response("<html><head><title>Real Name &amp; Co - Chrome Web Store</title></head></html>");
+    const stream = new ReadableStream({ start(c) { for (let i = 0; i < body.length; i += 65536) c.enqueue(new Uint8Array(body.subarray(i, i + 65536))); c.close(); } });
+    return new Response(stream.pipeThrough(new TransformStream({ transform(ch, ctl) { read += ch.byteLength; ctl.enqueue(ch); } })), { status: 200 });
+  }) as typeof fetch;
+  const m = await fetchManifest("a".repeat(32), fake);
+  assert.equal(m.name, "Real Name & Co");
+  assert.equal(m.version, "9.1");
+  assert.ok(read <= 9 * 1024 * 1024, `read ${read} bytes`);
+});

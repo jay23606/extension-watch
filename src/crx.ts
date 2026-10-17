@@ -3,6 +3,8 @@ import { FetchError, type Manifest } from "./types";
 const DOWNLOAD_TIMEOUT_MS = 8000;
 const MAX_CRX_BYTES = 60 * 1024 * 1024;
 const STREAM_LIMIT = 40 * 1024 * 1024;
+const LOCALE_SCAN_BYTES = 8 * 1024 * 1024;
+const UNSIZED_ENTRY_BYTES = 1024 * 1024;
 const MAXBITS = 15;
 
 const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
@@ -387,25 +389,78 @@ async function ensure(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uin
   return buf.size >= need;
 }
 
-async function readLocalEntry(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, pos: number): Promise<LocalEntry | "end" | "datadesc"> {
+/** Local header at pos. Entries with a data descriptor (sizes unknown) get dataEnd -1: DEFLATE marks its own end. */
+async function readLocalEntry(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, pos: number): Promise<LocalEntry | "end"> {
   if (!(await ensure(buf, reader, pos + 30))) return "end";
   if (u32le(buf.data(), pos) !== 0x04034b50) return "end";
   const flags = u16le(buf.data(), pos + 6);
   const method = u16le(buf.data(), pos + 8);
   const compSize = u32le(buf.data(), pos + 18);
-  const uncompSize = u32le(buf.data(), pos + 22);
   const nameLen = u16le(buf.data(), pos + 26);
   const extraLen = u16le(buf.data(), pos + 28);
-  if ((flags & 0x0008) !== 0 && compSize === 0 && uncompSize === 0) return "datadesc";
   if (!(await ensure(buf, reader, pos + 30 + nameLen))) return "end";
   const name = decodeUtf8(buf.data().subarray(pos + 30, pos + 30 + nameLen));
   const dataStart = pos + 30 + nameLen + extraLen;
-  return { name, method, dataStart, dataEnd: dataStart + compSize };
+  const sized = (flags & 0x0008) === 0 || compSize !== 0;
+  return { name, method, dataStart, dataEnd: sized ? dataStart + compSize : -1 };
 }
 
 async function entryData(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, entry: LocalEntry): Promise<Uint8Array> {
-  if (!(await ensure(buf, reader, entry.dataEnd))) throw new FetchError(400, "Truncated ZIP entry");
-  return inflateEntry(buf.data().subarray(entry.dataStart, entry.dataEnd), entry.method);
+  if (entry.dataEnd >= 0) {
+    if (!(await ensure(buf, reader, entry.dataEnd))) throw new FetchError(400, "Truncated ZIP entry");
+    return inflateEntry(buf.data().subarray(entry.dataStart, entry.dataEnd), entry.method);
+  }
+  if (entry.method !== 8) throw new FetchError(400, "Unsupported ZIP entry");
+  // Size unknown: read up to 1 MB of compressed data (manifests and messages are far smaller) and inflate to the final block.
+  await ensure(buf, reader, entry.dataStart + UNSIZED_ENTRY_BYTES);
+  return inflateRaw(buf.slice().subarray(entry.dataStart, Math.min(buf.size, entry.dataStart + UNSIZED_ENTRY_BYTES)));
+}
+
+/** Find the local header of `name` in the bytes streamed so far, reading on up to LOCALE_SCAN_BYTES. Native indexOf keeps CPU low. */
+async function findLocal(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, from: number, name: string): Promise<number> {
+  const target = new TextEncoder().encode(name);
+  let i = from;
+  for (;;) {
+    const data = buf.slice();
+    i = data.indexOf(0x50, i);
+    if (i < 0 || i + 30 + target.length > data.length) {
+      if (buf.size >= LOCALE_SCAN_BYTES) return -1;
+      const before = buf.size;
+      if (!(await ensure(buf, reader, buf.size + 65536)) && buf.size === before) return -1;
+      i = Math.max(from, (i < 0 ? before : i) - 64);
+      continue;
+    }
+    if (u32le(data, i) === 0x04034b50 && u16le(data, i + 26) === target.length && target.every((b, k) => data[i + 30 + k] === b)) return i;
+    i++;
+  }
+}
+
+/** Display name from the extension's Web Store page title, used when the locale file is too deep in a large package. */
+export async function storeTitle(id: string, fetchFn: typeof fetch = globalThis.fetch): Promise<string | null> {
+  try {
+    const res = await fetchFn(`https://chromewebstore.google.com/detail/${id}`, { redirect: "follow", signal: AbortSignal.timeout(5000), headers: { "accept-language": "en" } });
+    if (!res.ok || !res.body) return null;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (let read = 0; read < 1_500_000;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      read += value.byteLength;
+      text = (text + dec.decode(value, { stream: true })).slice(-200_000);
+      const m = /<title>([^<]{1,200}?) - Chrome Web Store<\/title>/.exec(text);
+      if (m) { await reader.cancel(); return decodeEntities(m[1] ?? "").trim() || null; }
+    }
+    await reader.cancel();
+    return null;
+  } catch (err) {
+    console.log("store title failed", err instanceof Error ? err.name : "error");
+    return null;
+  }
+}
+
+function decodeEntities(s: string): string {
+  return s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 }
 
 async function readWhole(reader: ReadableStreamDefaultReader<Uint8Array>, buf: StreamBuffer, id: string): Promise<Manifest> {
@@ -432,42 +487,42 @@ function wanted(name: string, locale: string | null): Wanted {
   return null;
 }
 
-async function streamManifest(response: Response, id: string): Promise<Manifest> {
+async function streamManifest(response: Response, id: string, fetchFn?: typeof fetch): Promise<Manifest> {
   if (!response.body) throw new FetchError(404, "Not on the Chrome Web Store");
   const reader = response.body.getReader();
   const buf = new StreamBuffer();
   await ensure(buf, reader, 16);
   if (buf.size === 0) throw new FetchError(404, "Not on the Chrome Web Store");
   const zipStart = crxZipOffset(buf.slice());
-  let manifestJson: Record<string, unknown> | null = null;
-  let locale: string | null = null;
-  let messages: Uint8Array | null = null;
-  let enMessages: Uint8Array | null = null;
-  let pos = zipStart;
-  while (manifestJson === null || (locale !== null && messages === null)) {
-    const entry = await readLocalEntry(buf, reader, pos);
-    if (entry === "end") break;
-    if (entry === "datadesc") return readWhole(reader, buf, id);
-    pos = entry.dataEnd;
-    const kind = wanted(entry.name, locale);
-    if (kind === "manifest") {
-      manifestJson = parseManifestJson(await entryData(buf, reader, entry));
-      const dl = manifestJson.default_locale;
-      locale = typeof dl === "string" && dl !== "" ? dl : null;
-    } else if (kind === "locale") {
-      messages = await entryData(buf, reader, entry);
-    } else if (kind === "en") {
-      enMessages = await entryData(buf, reader, entry);
+  try {
+    // Find the root manifest.json header directly: entries before it may have unknown sizes (data descriptors).
+    let manifestJson: Record<string, unknown> | null = null;
+    const at = await findLocal(buf, reader, zipStart, "manifest.json");
+    const entry = at >= 0 ? await readLocalEntry(buf, reader, at) : "end";
+    if (entry !== "end") manifestJson = parseManifestJson(await entryData(buf, reader, entry));
+    if (manifestJson === null) throw new FetchError(422, "manifest.json is not in the first 8 MB of this package");
+    const messages = await streamMessages(buf, reader, zipStart, manifestJson);
+    const manifest = buildManifest(manifestJson, id, parseMessages(messages));
+    if (messages === null && (manifest.name.includes("__MSG_") || manifest.description.includes("__MSG_"))) {
+      manifest.name = manifest.name.includes("__MSG_") ? (await storeTitle(id, fetchFn)) ?? stripMarkers(manifest.name) : manifest.name;
+      manifest.description = stripMarkers(manifest.description).replace(/^\S+$/, "");
     }
+    return manifest;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  await reader.cancel();
-  if (manifestJson === null) throw new FetchError(400, "manifest.json not found");
-  const manifest = buildManifest(manifestJson, id, parseMessages(messages ?? enMessages ?? null));
-  if (messages === null && enMessages === null) {
-    manifest.name = stripMarkers(manifest.name);
-    manifest.description = stripMarkers(manifest.description);
+}
+
+async function streamMessages(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, from: number, manifestJson: Record<string, unknown>): Promise<Uint8Array | null> {
+  const dl = manifestJson.default_locale;
+  if (typeof dl !== "string" || dl === "") return null;
+  for (const loc of dl === "en" ? ["en"] : [dl, "en"]) {
+    const at = await findLocal(buf, reader, from, `_locales/${loc}/messages.json`);
+    if (at < 0) continue;
+    const entry = await readLocalEntry(buf, reader, at);
+    if (entry !== "end") return entryData(buf, reader, entry);
   }
-  return manifest;
+  return null;
 }
 
 export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise<Manifest> {
@@ -493,7 +548,7 @@ export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise
     };
     return sparseManifest(total, head, get, normalized);
   }
-  return streamManifest(first, normalized);
+  return streamManifest(first, normalized, fetchFn);
 }
 
 function buildManifest(raw: Record<string, unknown>, id: string, messages: Record<string, { message: string }> | null): Manifest {
