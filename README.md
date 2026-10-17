@@ -1,5 +1,7 @@
 # Extension Watch
 
+![Extension Watch](docs/cover.jpg)
+
 Know what your team's Chrome extensions can do, and hear about it when that changes. Built by Michael Lip ([github.com/theluckystrike](https://github.com/theluckystrike)), who maintains 108 Chrome extensions with more than 150,000 users. Live at https://extension-watch.lipmichal.workers.dev
 
 ## The problem
@@ -15,6 +17,16 @@ Every company runs dozens of browser extensions that nobody reviewed. Extensions
 5. Add a Slack or Discord webhook (or any https endpoint that takes JSON) and changes of medium severity or higher arrive as one message after each check.
 
 The grade measures access, not intent. A password manager needs to read every page, so it grades F, and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
+
+## Screenshots
+
+Scan results: each extension's access grade, its highest finding, and a details drawer with every rule that fired.
+
+![Scan results](docs/results.png)
+
+A watchlist: the private link (blurred here), the change log, the extensions and the alert webhook.
+
+![Watchlist](docs/watchlist.png)
 
 ## How it works
 

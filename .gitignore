@@ -3,3 +3,7 @@ node_modules/
 dist/
 .dev.vars
 SUBMISSION.md
+video/
+visuals/raw/
+visuals/logs/
+video/
