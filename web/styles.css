@@ -860,3 +860,7 @@ main, section, .view, .container { min-width: 0; }
 #workspaceEmpty { padding: 20px; margin-bottom: 16px; }
 .watch-ext { overflow-x: auto; max-width: 100%; }
 .card { min-width: 0; max-width: 100%; }
+.watch-link-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.watch-link-line .watch-link { overflow-wrap: anywhere; }
+#watchDelete { margin-left: 0; }
+#adminNote { margin-top: 4px; }
