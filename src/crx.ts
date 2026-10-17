@@ -2,6 +2,7 @@ import { FetchError, type Manifest } from "./types";
 
 const DOWNLOAD_TIMEOUT_MS = 8000;
 const MAX_CRX_BYTES = 60 * 1024 * 1024;
+const STREAM_LIMIT = 40 * 1024 * 1024;
 const MAXBITS = 15;
 
 const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
@@ -206,27 +207,38 @@ function inflateRaw(data: Uint8Array): Uint8Array {
   return new Inflater(data).run();
 }
 
+export function parseManifestJson(data: Uint8Array): Record<string, unknown> {
+  try {
+    return JSON.parse(stripComments(stripBom(decodeUtf8(data)))) as Record<string, unknown>;
+  } catch {
+    throw new FetchError(400, "Invalid manifest.json");
+  }
+}
+
+function parseMessages(data: Uint8Array | null): Record<string, { message: string }> | null {
+  if (data === null) return null;
+  try {
+    return JSON.parse(stripComments(stripBom(decodeUtf8(data)))) as Record<string, { message: string }>;
+  } catch {
+    throw new FetchError(400, "Invalid messages.json");
+  }
+}
+
+function stripMarkers(value: string): string {
+  const match = /^__MSG_(.+?)__$/.exec(value);
+  return match ? match[1]! : value;
+}
+
 export function parseCrx(bytes: Uint8Array, id: string): Manifest {
   const zip = bytes.subarray(crxZipOffset(bytes));
   const manifestRaw = readZipEntry(zip, "manifest.json");
   if (!manifestRaw) throw new FetchError(400, "manifest.json not found");
-  let manifestJson: Record<string, unknown>;
-  try {
-    manifestJson = JSON.parse(stripComments(stripBom(decodeUtf8(manifestRaw)))) as Record<string, unknown>;
-  } catch {
-    throw new FetchError(400, "Invalid manifest.json");
-  }
+  const manifestJson = parseManifestJson(manifestRaw);
   let messages: Record<string, { message: string }> | null = null;
   const locale = typeof manifestJson.default_locale === "string" ? manifestJson.default_locale : null;
   if (locale) {
     const raw = readZipEntry(zip, `_locales/${locale}/messages.json`) ?? readZipEntry(zip, "_locales/en/messages.json");
-    if (raw) {
-      try {
-        messages = JSON.parse(stripComments(stripBom(decodeUtf8(raw)))) as Record<string, { message: string }>;
-      } catch {
-        throw new FetchError(400, "Invalid messages.json");
-      }
-    }
+    messages = parseMessages(raw);
   }
   return buildManifest(manifestJson, id, messages);
 }
@@ -329,9 +341,133 @@ async function sparseManifest(total: number, head: Uint8Array, get: Ranged, id: 
   };
   await fill("manifest.json");
   const raw = readZipEntry(zip, "manifest.json");
-  const locale = raw ? (/"default_locale"\s*:\s*"([^"]+)"/.exec(decodeUtf8(raw))?.[1] ?? null) : null;
+  // Same parser as parseCrx (comments and BOM stripped), so both paths agree on the locale.
+  const dl = raw ? parseManifestJson(raw).default_locale : null;
+  const locale = typeof dl === "string" ? dl : null;
   if (locale) await Promise.all([fill(`_locales/${locale}/messages.json`), fill("_locales/en/messages.json")]);
   return parseCrx(buf, id);
+}
+
+class StreamBuffer {
+  private store = new Uint8Array(64 * 1024);
+  size = 0;
+
+  append(chunk: Uint8Array): void {
+    const need = this.size + chunk.length;
+    if (need > this.store.length) {
+      let cap = this.store.length * 2;
+      while (cap < need) cap *= 2;
+      const next = new Uint8Array(cap);
+      next.set(this.store.subarray(0, this.size));
+      this.store = next;
+    }
+    this.store.set(chunk, this.size);
+    this.size = need;
+  }
+
+  data(): Uint8Array {
+    return this.store;
+  }
+
+  slice(): Uint8Array {
+    return this.store.subarray(0, this.size);
+  }
+}
+
+type Wanted = "manifest" | "locale" | "en" | null;
+
+interface LocalEntry { name: string; method: number; dataStart: number; dataEnd: number; }
+
+async function ensure(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, need: number): Promise<boolean> {
+  while (buf.size < need && buf.size < STREAM_LIMIT) {
+    const { value, done } = await reader.read();
+    if (done) return false;
+    buf.append(value);
+  }
+  return buf.size >= need;
+}
+
+async function readLocalEntry(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, pos: number): Promise<LocalEntry | "end" | "datadesc"> {
+  if (!(await ensure(buf, reader, pos + 30))) return "end";
+  if (u32le(buf.data(), pos) !== 0x04034b50) return "end";
+  const flags = u16le(buf.data(), pos + 6);
+  const method = u16le(buf.data(), pos + 8);
+  const compSize = u32le(buf.data(), pos + 18);
+  const uncompSize = u32le(buf.data(), pos + 22);
+  const nameLen = u16le(buf.data(), pos + 26);
+  const extraLen = u16le(buf.data(), pos + 28);
+  if ((flags & 0x0008) !== 0 && compSize === 0 && uncompSize === 0) return "datadesc";
+  if (!(await ensure(buf, reader, pos + 30 + nameLen))) return "end";
+  const name = decodeUtf8(buf.data().subarray(pos + 30, pos + 30 + nameLen));
+  const dataStart = pos + 30 + nameLen + extraLen;
+  return { name, method, dataStart, dataEnd: dataStart + compSize };
+}
+
+async function entryData(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, entry: LocalEntry): Promise<Uint8Array> {
+  if (!(await ensure(buf, reader, entry.dataEnd))) throw new FetchError(400, "Truncated ZIP entry");
+  return inflateEntry(buf.data().subarray(entry.dataStart, entry.dataEnd), entry.method);
+}
+
+async function readWhole(reader: ReadableStreamDefaultReader<Uint8Array>, buf: StreamBuffer, id: string): Promise<Manifest> {
+  let chunk = await reader.read();
+  while (!chunk.done) {
+    buf.append(chunk.value);
+    if (buf.size > MAX_CRX_BYTES) throw new FetchError(413, "Extension package exceeds 60 MB");
+    chunk = await reader.read();
+  }
+  return parseCrx(buf.slice(), id);
+}
+
+function inflateEntry(data: Uint8Array, method: number): Uint8Array {
+  if (method === 0) return data;
+  if (method === 8) return inflateRaw(data);
+  throw new FetchError(400, "Unsupported compression method");
+}
+
+function wanted(name: string, locale: string | null): Wanted {
+  if (name === "manifest.json") return "manifest";
+  if (locale === null) return null;
+  if (name === `_locales/${locale}/messages.json`) return "locale";
+  if (locale !== "en" && name === "_locales/en/messages.json") return "en";
+  return null;
+}
+
+async function streamManifest(response: Response, id: string): Promise<Manifest> {
+  if (!response.body) throw new FetchError(404, "Not on the Chrome Web Store");
+  const reader = response.body.getReader();
+  const buf = new StreamBuffer();
+  await ensure(buf, reader, 16);
+  if (buf.size === 0) throw new FetchError(404, "Not on the Chrome Web Store");
+  const zipStart = crxZipOffset(buf.slice());
+  let manifestJson: Record<string, unknown> | null = null;
+  let locale: string | null = null;
+  let messages: Uint8Array | null = null;
+  let enMessages: Uint8Array | null = null;
+  let pos = zipStart;
+  while (manifestJson === null || (locale !== null && messages === null)) {
+    const entry = await readLocalEntry(buf, reader, pos);
+    if (entry === "end") break;
+    if (entry === "datadesc") return readWhole(reader, buf, id);
+    pos = entry.dataEnd;
+    const kind = wanted(entry.name, locale);
+    if (kind === "manifest") {
+      manifestJson = parseManifestJson(await entryData(buf, reader, entry));
+      const dl = manifestJson.default_locale;
+      locale = typeof dl === "string" && dl !== "" ? dl : null;
+    } else if (kind === "locale") {
+      messages = await entryData(buf, reader, entry);
+    } else if (kind === "en") {
+      enMessages = await entryData(buf, reader, entry);
+    }
+  }
+  await reader.cancel();
+  if (manifestJson === null) throw new FetchError(400, "manifest.json not found");
+  const manifest = buildManifest(manifestJson, id, parseMessages(messages ?? enMessages ?? null));
+  if (messages === null && enMessages === null) {
+    manifest.name = stripMarkers(manifest.name);
+    manifest.description = stripMarkers(manifest.description);
+  }
+  return manifest;
 }
 
 export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise<Manifest> {
@@ -343,21 +479,21 @@ export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise
   const first = await impl(url, { redirect: "follow", signal, headers: { range: "bytes=0-65535" } });
   if (first.status === 204) throw new FetchError(404, "Not on the Chrome Web Store");
   if (!first.ok) throw new FetchError(first.status, `Download failed: HTTP ${first.status}`);
-  const head = new Uint8Array(await first.arrayBuffer());
-  if (head.byteLength === 0) throw new FetchError(404, "Not on the Chrome Web Store");
-  const total = Number(/\/(\d+)$/.exec(first.headers.get("content-range") ?? "")?.[1] ?? "0");
-  if (first.status !== 206 || !total || total <= head.byteLength) {
-    if (head.byteLength > MAX_CRX_BYTES) throw new FetchError(413, "Extension package exceeds 60 MB");
-    return parseCrx(head, normalized); // the server sent the whole package
+  if (first.status === 206) {
+    const head = new Uint8Array(await first.arrayBuffer());
+    if (head.byteLength === 0) throw new FetchError(404, "Not on the Chrome Web Store");
+    const total = Number(/\/(\d+)$/.exec(first.headers.get("content-range") ?? "")?.[1] ?? "0");
+    if (!total || total <= head.byteLength) return parseCrx(head, normalized);
+    if (total > 200 * 1024 * 1024) throw new FetchError(413, "Extension package exceeds 200 MB");
+    const finalUrl = first.url || url;
+    const get: Ranged = async (start, end) => {
+      const r = await impl(finalUrl, { redirect: "follow", signal, headers: { range: `bytes=${start}-${end}` } });
+      if (r.status !== 206) throw new FetchError(502, "The Chrome Web Store did not return the requested part");
+      return new Uint8Array(await r.arrayBuffer());
+    };
+    return sparseManifest(total, head, get, normalized);
   }
-  if (total > 200 * 1024 * 1024) throw new FetchError(413, "Extension package exceeds 200 MB");
-  const finalUrl = first.url || url;
-  const get: Ranged = async (start, end) => {
-    const r = await impl(finalUrl, { redirect: "follow", signal, headers: { range: `bytes=${start}-${end}` } });
-    if (r.status !== 206) throw new FetchError(502, "The Chrome Web Store did not return the requested part");
-    return new Uint8Array(await r.arrayBuffer());
-  };
-  return sparseManifest(total, head, get, normalized);
+  return streamManifest(first, normalized);
 }
 
 function buildManifest(raw: Record<string, unknown>, id: string, messages: Record<string, { message: string }> | null): Manifest {

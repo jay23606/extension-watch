@@ -97,6 +97,7 @@
       </form>
       <p id="watchStatus" class="status" role="status" aria-live="polite" hidden></p>
 
+      <p id="workspaceEmpty" class="card drawer__empty">No scan yet. <a href="/" data-nav="landing">Paste extension IDs or Web Store links</a> on the start page to see their access grades here.</p>
       <div class="table-wrap" aria-live="polite">
         <table class="results">
           <thead>
@@ -149,6 +150,20 @@
       <section aria-labelledby="ext-heading">
         <h2 class="section-title" id="ext-heading">Extensions</h2>
         <div id="watchExtensions" class="card"></div>
+      </section>
+
+      <section aria-labelledby="alert-heading">
+        <h2 class="section-title" id="alert-heading">Alerts</h2>
+        <form id="alertForm" class="card alert-form">
+          <label for="alertUrl" class="alert-form__label">Webhook URL</label>
+          <p class="alert-form__help">A Slack or Discord incoming webhook, or an ntfy.sh topic (for example https://ntfy.sh/your-random-topic) for a free push to your phone. After each daily check, changes of medium severity or higher are sent here. Only the watchlist name and public extension data are sent.</p>
+          <div class="alert-form__row">
+            <input id="alertUrl" class="watch-form__input" type="url" inputmode="url" placeholder="https://hooks.slack.com/services/..." autocomplete="off" />
+            <button type="submit" class="btn btn--primary">Save</button>
+            <button type="button" id="alertTest" class="btn btn--ghost">Send test alert</button>
+          </div>
+          <p id="alertStatus" class="status" role="status" aria-live="polite" hidden></p>
+        </form>
       </section>
       <p class="back"><a href="/" data-nav="landing">Back to product</a></p>
     </section>

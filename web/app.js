@@ -14,6 +14,14 @@ const CHANGE_LABEL = {
   mv_changed: "Manifest version changed",
   new_extension: "New extension",
   removed_from_store: "Removed from store",
+  content_script_added: "Runs on new sites",
+  content_script_removed: "No longer runs on sites",
+  optional_added: "Can now request",
+  externally_connectable_added: "Accepts messages from",
+  csp_changed: "Script policy loosened",
+  update_url_changed: "Updates from outside the store",
+  score_jump: "Access grade rose",
+  version_changed: "New version",
 };
 
 let lastIds = [];
@@ -148,7 +156,7 @@ function buildDrawer(item) {
 
   wrap.appendChild(el("h3", "drawer__heading", "Findings"));
   if (!findings.length) {
-    wrap.appendChild(el("p", "drawer__empty", "No risk findings. This extension looks clean."));
+    wrap.appendChild(el("p", "drawer__empty", "No scored permissions. The grade covers access only, not intent."));
   } else {
     const list = el("ul", "finding-list");
     for (const f of findings) list.appendChild(buildFindingItem(f));
@@ -250,14 +258,16 @@ function buildResultRow(item) {
   return frag;
 }
 
-function renderResults(results, invalid = []) {
+function renderResults(results, invalid = [], dropped = 0) {
+  $("#workspaceEmpty").hidden = results.length > 0;
   const tbody = $("#resultsTbody");
   tbody.replaceChildren();
   for (const item of results) tbody.appendChild(buildResultRow(item));
   const ok = results.filter((r) => !r.error).length;
   const bad = results.length - ok;
   const skipped = invalid.length ? " Not extension IDs: " + invalid.slice(0, 5).join(", ") + (invalid.length > 5 ? " and " + (invalid.length - 5) + " more" : "") + "." : "";
-  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped, "info");
+  const over = dropped > 0 ? " The first 25 were scanned; " + dropped + " more were left out." : "";
+  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped + over, "info");
 }
 
 async function runScan(ids) {
@@ -332,7 +342,9 @@ function buildWatchExtensions(extensions) {
     const m = item && item.manifest;
     const a = item && item.assessment;
     const tr = el("tr");
-    tr.appendChild(el("td", "watch-table__name", (m && m.name) || (item && item.id) || ""));
+    const nameCell = el("td", "watch-table__name", (m && m.name) || (item && item.id) || "");
+    if (item && item.error) nameCell.appendChild(el("span", "watch-table__error", " " + item.error));
+    tr.appendChild(nameCell);
     const risk = el("td");
     risk.appendChild(gradeBadge(a && a.grade ? a.grade : "?"));
     tr.appendChild(risk);
@@ -351,6 +363,20 @@ function renderWatchlist(data, token) {
   const link = $("#watchLink");
   link.href = "/w/" + token;
   link.textContent = window.location.origin + "/w/" + token;
+  wireAlerts(token, data && data.webhook);
+  let del = document.getElementById("watchDelete");
+  if (!del) {
+    del = el("button", "btn btn--ghost", "Delete this watchlist");
+    del.id = "watchDelete";
+    del.type = "button";
+    link.parentNode.appendChild(del);
+  }
+  del.onclick = async () => {
+    if (!window.confirm("Delete this watchlist and its history? This cannot be undone.")) return;
+    const res = await fetch("/api/watchlists/" + encodeURIComponent(token), { method: "DELETE" });
+    $("#watchMeta").textContent = res.ok ? "Deleted. This link no longer works." : "Could not delete. Try again.";
+    if (res.ok) { $("#watchExtensions").replaceChildren(); $("#watchChanges").replaceChildren(); del.remove(); }
+  };
   const changes = $("#watchChanges");
   const names = {};
   for (const [id, snap] of Object.entries((data && data.snapshots) || {})) names[id] = snap && snap.manifest ? snap.manifest.name : id;
@@ -361,6 +387,33 @@ function renderWatchlist(data, token) {
   const snaps = (data && data.snapshots) || {};
   const list = ((data && data.ids) || Object.keys(snaps)).map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
+}
+
+function wireAlerts(token, webhook) {
+  const form = $("#alertForm");
+  const input = $("#alertUrl");
+  const status = $("#alertStatus");
+  input.value = webhook || "";
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const res = await apiJson("/api/watchlists/" + encodeURIComponent(token), {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ webhook: input.value.trim() }),
+      });
+      setStatus(status, res.webhook ? "Saved. Changes will be sent to this webhook." : "Alerts turned off.", "info");
+    } catch (err) {
+      setStatus(status, err.message, "error");
+    }
+  };
+  $("#alertTest").onclick = async () => {
+    setStatus(status, "Sending\u2026", "info");
+    try {
+      const res = await apiJson("/api/test-alert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+      setStatus(status, res.sent ? "Test alert sent. Check your channel." : "The webhook did not accept it (HTTP " + res.status + "). Check the URL.", res.sent ? "info" : "error");
+    } catch (err) {
+      setStatus(status, err.message, "error");
+    }
+  };
 }
 
 function extractRules(data) {
@@ -467,7 +520,7 @@ function wireTryForm() {
       const results = await runScan(ids);
       lastIds = ids;
       const invalid = $("#tryInput").value.split(/\s+/).filter(Boolean).filter((line) => parseIds(line).length === 0);
-      renderResults(results, invalid);
+      renderResults(results, invalid, Math.max(0, ids.length - 25));
       $("#watchForm").hidden = false;
       setStatus($("#watchStatus"), "", null);
       showView("workspace");

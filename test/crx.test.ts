@@ -116,6 +116,69 @@ function fakeFetch(response: Response, captured?: { url: string }): typeof fetch
   }) as unknown as typeof fetch;
 }
 
+/** Serves a body in fixed-size chunks so fetchManifest must stream and can stop early. */
+function chunkedFetch(body: Uint8Array, count: { n: number }, chunkSize = 64 * 1024): typeof fetch {
+  return (async () => {
+    let pos = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pos >= body.length) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(pos + chunkSize, body.length);
+        controller.enqueue(body.subarray(pos, end));
+        count.n = end;
+        pos = end;
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }) as unknown as typeof fetch;
+}
+
+/** Records the RequestInit passed to fetch so a test can inspect the abort signal. */
+function capturingFetch(response: Response, captured: { init?: RequestInit }): typeof fetch {
+  return (async (_url: unknown, init?: RequestInit) => {
+    captured.init = init;
+    return response;
+  }) as unknown as typeof fetch;
+}
+
+/** Builds a ZIP whose local headers use a data descriptor (flag bit 3) and zeroed local sizes. */
+function buildDataDescriptorZip(files: { name: string; data: Uint8Array; method?: number }[]): Uint8Array {
+  const entries: { name: string; comp: Uint8Array; data: Uint8Array; method: number; localOffset: number }[] = [];
+  const locals: Uint8Array[] = [];
+  let offset = 0;
+  for (const f of files) {
+    const method = f.method ?? 8;
+    const nameBytes = new TextEncoder().encode(f.name);
+    const comp = method === 8 ? new Uint8Array(deflateRawSync(f.data)) : f.data;
+    const local = new Writer()
+      .u32(0x04034b50).u16(20).u16(0x0008).u16(method).u16(0).u16(0)
+      .u32(0).u32(0).u32(0).u16(nameBytes.length).u16(0)
+      .bytes(nameBytes).bytes(comp)
+      .u32(0x08074b50).u32(0).u32(comp.length).u32(f.data.length)
+      .build();
+    entries.push({ name: f.name, comp, data: f.data, method, localOffset: offset });
+    offset += local.length;
+    locals.push(local);
+  }
+  const central = new Writer();
+  for (const e of entries) {
+    const nameBytes = new TextEncoder().encode(e.name);
+    central.u32(0x02014b50).u16(20).u16(20).u16(0x0008).u16(e.method).u16(0).u16(0)
+      .u32(0).u32(e.comp.length).u32(e.data.length).u16(nameBytes.length).u16(0).u16(0)
+      .u16(0).u16(0).u32(0).u32(e.localOffset).bytes(nameBytes);
+  }
+  const centralBytes = central.build();
+  const eocd = new Writer()
+    .u32(0x06054b50).u16(0).u16(0).u16(files.length).u16(files.length)
+    .u32(centralBytes.length).u32(offset).u16(0);
+  const all = new Writer();
+  for (const l of locals) all.bytes(l);
+  return all.bytes(centralBytes).bytes(eocd.build()).build();
+}
+
 test("normalizeId accepts a 32-char a-p id", () => {
   assert.equal(normalizeId(ID), ID);
 });
@@ -307,11 +370,17 @@ test("fetchManifest throws FetchError 404 on an empty body", async () => {
   });
 });
 
-test("fetchManifest throws FetchError 413 on an oversize package", async () => {
-  const big = new Response(new Uint8Array(60 * 1024 * 1024 + 1) as unknown as BodyInit);
-  await assert.rejects(fetchManifest(ID, fakeFetch(big)), (err: unknown) => {
-    return err instanceof FetchError && err.status === 413;
-  });
+test("fetchManifest streams a large 200 package without a 60 MB failure", async () => {
+  const filler = new Uint8Array(70 * 1024 * 1024); // 70 MB of stored filler placed after manifest.json
+  const bytes = manifestCrx(
+    { manifest_version: 3, name: "Streamed", version: "1.0" },
+    [{ name: "filler.bin", data: filler, method: 0 }],
+  );
+  const count = { n: 0 };
+  const m = await fetchManifest(ID, chunkedFetch(bytes, count));
+  assert.equal(m.name, "Streamed");
+  assert.ok(bytes.length > 70 * 1024 * 1024, "fixture is over 70 MB");
+  assert.ok(count.n < 2 * 1024 * 1024, `read ${count.n} bytes, expected under 2 MB`);
 });
 
 test("fetchManifest throws FetchError on an HTTP error", async () => {
@@ -348,4 +417,57 @@ test("fetchManifest reads a large package with range requests only", async () =>
   assert.equal(m.version, "9.9");
   const fetched = log.reduce((sum, r) => { const [a, b] = r.split("-").map(Number); return sum + (b! - a! + 1); }, 0);
   assert.ok(fetched < bytes.length / 4, `read ${fetched} of ${bytes.length} bytes`);
+});
+
+test("fetchManifest falls back to a full read for data-descriptor entries", async () => {
+  const bytes = crx3(buildDataDescriptorZip([
+    { name: "manifest.json", data: jsonBytes({ manifest_version: 3, name: "Descriptor", version: "1.0" }) },
+  ]));
+  const m = await fetchManifest(ID, fakeFetch(okResponse(bytes)));
+  assert.equal(m.name, "Descriptor");
+});
+
+test("fetchManifest resolves a locale before a large filler entry", async () => {
+  const filler = new Uint8Array(20 * 1024 * 1024);
+  const bytes = manifestCrx(
+    { manifest_version: 3, name: "__MSG_appName__", version: "2.0", default_locale: "de" },
+    [
+      { name: "_locales/de/messages.json", data: jsonBytes({ appName: { message: "Streamed German" } }) },
+      { name: "filler.bin", data: filler, method: 0 },
+    ],
+  );
+  const count = { n: 0 };
+  const m = await fetchManifest(ID, chunkedFetch(bytes, count));
+  assert.equal(m.name, "Streamed German");
+  assert.ok(count.n < 2 * 1024 * 1024, `read ${count.n} bytes, expected under 2 MB`);
+});
+
+test("fetchManifest strips __MSG__ markers when the locale file is not found", async () => {
+  const bytes = manifestCrx({ manifest_version: 3, name: "__MSG_appName__", version: "1.0", default_locale: "xx" });
+  const m = await fetchManifest(ID, fakeFetch(okResponse(bytes)));
+  assert.equal(m.name, "appName");
+});
+
+test("fetchManifest uses an 8 s AbortSignal timeout", async () => {
+  const bytes = manifestCrx({ manifest_version: 3, name: "X", version: "1.0" });
+  const captured: { init?: RequestInit } = {};
+  const original = AbortSignal.timeout;
+  let timeoutMs = -1;
+  AbortSignal.timeout = ((ms: number) => {
+    timeoutMs = ms;
+    return original.call(AbortSignal, ms);
+  }) as typeof AbortSignal.timeout;
+  try {
+    await fetchManifest(ID, capturingFetch(okResponse(bytes), captured));
+  } finally {
+    AbortSignal.timeout = original;
+  }
+  assert.equal(timeoutMs, 8000);
+  assert.ok(captured.init?.signal instanceof AbortSignal);
+});
+
+test("manifest parser ignores a commented-out default_locale (sparse and full paths agree)", async () => {
+  const { parseManifestJson } = await import("../src/crx.js");
+  const src = '\uFEFF{\n  // "default_locale": "fr",\n  "default_locale": "de", "name": "__MSG_n__", "version": "1", "manifest_version": 3\n}';
+  assert.equal(parseManifestJson(new TextEncoder().encode(src)).default_locale, "de");
 });

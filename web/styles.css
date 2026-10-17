@@ -850,3 +850,11 @@ button:focus-visible,
 main, section, .view, .container { min-width: 0; }
 .change__ext { font-weight: 600; }
 .change__at { color: var(--muted, #8A96B0); font-size: 13px; margin-left: auto; }
+.watch-table__error { display: block; color: #F5B83D; font-size: 12px; font-weight: 400; }
+#watchDelete { margin-left: 12px; font-size: 13px; }
+.alert-form { display: grid; gap: 10px; padding: 20px; }
+.alert-form__label { font-weight: 600; }
+.alert-form__help { margin: 0; color: var(--muted, #8A96B0); font-size: 14px; line-height: 1.55; max-width: 72ch; }
+.alert-form__row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.alert-form__row .watch-form__input { flex: 1 1 280px; min-width: 0; }
+#workspaceEmpty { padding: 20px; margin-bottom: 16px; }

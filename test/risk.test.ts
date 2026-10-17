@@ -35,7 +35,7 @@ test("empty manifest scores 0 and grades A with no findings", () => {
   assert.equal(a.score, 0);
   assert.equal(a.grade, "A");
   assert.equal(a.findings.length, 0);
-  assert.equal(a.summary, "No notable risk permissions.");
+  assert.equal(a.summary, "No scored permissions.");
 });
 
 test("debugger is 30 points and critical", () => {
@@ -55,10 +55,10 @@ test("broad host access is 30 points and critical", () => {
   assert.equal(a.findings[0]!.severity, "critical");
 });
 
-test("Google Translate manifest scores 55, grade C", () => {
+test("Google Translate manifest scores 30, grade B (capability group max)", () => {
   const a = assess(GOOGLE_TRANSLATE);
-  assert.equal(a.score, 55);
-  assert.equal(a.grade, "C");
+  assert.equal(a.score, 30);
+  assert.equal(a.grade, "B");
   assert.equal(a.findings.length, 2);
   assert.equal(a.findings[0]!.code, "broad_hosts");
   assert.equal(a.findings[1]!.code, "scripting");
@@ -134,9 +134,20 @@ test("CSP with remote script host is 20 points high", () => {
   assert.equal(a.findings[0]!.code, "csp_unsafe");
 });
 
+test("CSP with remote host in default-src is flagged when script-src is missing", () => {
+  const a = assess(manifest({ csp: "default-src 'self' https://cdn.example.com" }));
+  assert.equal(a.findings[0]!.code, "csp_unsafe");
+});
+
 test("safe CSP is not flagged", () => {
   const a = assess(manifest({ csp: "script-src 'self'; object-src 'self'" }));
   assert.equal(a.findings.length, 0);
+});
+
+test("CSP with 'wasm-unsafe-eval' is not flagged (C1)", () => {
+  const a = assess(manifest({ csp: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }));
+  assert.equal(a.findings.length, 0);
+  assert.equal(a.score, 0);
 });
 
 test("update URL outside Google is 15 points high", () => {
@@ -151,10 +162,53 @@ test("Google update URL is not flagged", () => {
   assert.equal(a.findings.length, 0);
 });
 
-test("optional permissions do not affect the score", () => {
+test("a lookalike domain is not a Google update host (L2)", () => {
+  const a = assess(manifest({ updateUrl: "https://google.com.evil.example/update.xml" }));
+  assert.equal(a.findings[0]!.code, "update_url_external");
+});
+
+test("host pattern with a bare path still grants every site (C2)", () => {
+  const a = assess(manifest({ hostPermissions: ["https://*/"] }));
+  assert.equal(a.findings[0]!.code, "broad_hosts");
+  assert.equal(a.score, 30);
+});
+
+test("host pattern with a wildcard path is broad (C2)", () => {
+  const a = assess(manifest({ hostPermissions: ["*://*/x"] }));
+  assert.equal(a.findings[0]!.code, "broad_hosts");
+  assert.equal(a.score, 30);
+});
+
+test("content scripts and externally connectable treat bare-path patterns as broad (C2)", () => {
+  const byScripts = assess(manifest({ contentScriptMatches: ["https://*/"] }));
+  assert.equal(byScripts.findings[0]!.code, "content_scripts_all_sites");
+  const byExt = assess(manifest({ externallyConnectable: ["http://*/"] }));
+  assert.equal(byExt.findings[0]!.code, "externally_connectable_all");
+});
+
+test("optional permissions are listed as 'can request later' with 0 points (H6)", () => {
   const a = assess(manifest({ optionalPermissions: ["debugger", "cookies"] }));
   assert.equal(a.score, 0);
-  assert.equal(a.findings.length, 0);
+  assert.equal(a.grade, "A");
+  const titles = a.findings.map((f) => f.title).sort();
+  assert.deepEqual(titles, ["Can request later: cookies", "Can request later: debugger"]);
+  for (const f of a.findings) {
+    assert.equal(f.points, 0);
+    assert.equal(f.severity, "low");
+  }
+});
+
+test("optional broad host is listed as 'can request later' without inflating the score", () => {
+  const a = assess(manifest({ optionalPermissions: ["*://*/*"] }));
+  assert.equal(a.score, 0);
+  assert.equal(a.findings[0]!.title, "Can request later: *://*/*");
+  assert.equal(a.findings[0]!.points, 0);
+});
+
+test("capability groups score by the maximum, not the sum (H6)", () => {
+  const a = assess(manifest({ hostPermissions: ["<all_urls>"], permissions: ["scripting"], contentScriptMatches: ["*://*/*"] }));
+  assert.equal(a.score, 30);
+  assert.equal(a.grade, "B");
 });
 
 test("low severity permissions: tabs, downloads, geolocation", () => {
@@ -228,8 +282,12 @@ test("severityFor boundaries are correct", () => {
   assert.equal(severityFor(25), "critical");
 });
 
-test("RULES has unique codes and positive points", () => {
+test("RULES has unique codes, positive points, and a group and severity for every rule (L1)", () => {
   const codes = new Set(RULES.map((r) => r.code));
   assert.equal(codes.size, RULES.length);
-  for (const r of RULES) assert.ok(r.points > 0);
+  for (const r of RULES) {
+    assert.ok(r.points > 0);
+    assert.ok(typeof r.group === "string" && r.group.length > 0);
+    assert.equal(r.severity, severityFor(r.points));
+  }
 });
