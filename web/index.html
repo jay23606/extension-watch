@@ -6,7 +6,7 @@
   <meta name="description" content="Extension Watch reviews the Chrome extensions your team uses, scores their risk, and alerts you when an update silently adds permissions." />
   <meta name="theme-color" content="#0a0d14" />
   <title>Extension Watch — know what your Chrome extensions can do</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="topbar">
@@ -86,6 +86,7 @@
       <div class="page-head">
         <h1 class="page-title">Workspace</h1>
         <p class="page-sub">Review the extensions you scanned, then set a watchlist to catch silent updates.</p>
+        <p class="page-note">The access grade shows how much an extension can do on your computer, not whether it is malicious. A password manager needs a high grade to work; a calculator does not.</p>
       </div>
 
       <form id="watchForm" class="watch-form" hidden>
@@ -101,7 +102,7 @@
           <thead>
             <tr>
               <th scope="col">Extension</th>
-              <th scope="col">Risk</th>
+              <th scope="col">Access</th>
               <th scope="col">Score</th>
               <th scope="col" class="results__top-col">Top finding</th>
               <th scope="col"><span class="sr-only">Details</span></th>
@@ -157,6 +158,6 @@
     Extension Watch by Michael Lip, github.com/theluckystrike. Not affiliated with Google.
   </footer>
 
-  <script src="app.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

@@ -250,13 +250,14 @@ function buildResultRow(item) {
   return frag;
 }
 
-function renderResults(results) {
+function renderResults(results, invalid = []) {
   const tbody = $("#resultsTbody");
   tbody.replaceChildren();
   for (const item of results) tbody.appendChild(buildResultRow(item));
   const ok = results.filter((r) => !r.error).length;
   const bad = results.length - ok;
-  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " failed" : "") + ".", "info");
+  const skipped = invalid.length ? " Not extension IDs: " + invalid.slice(0, 5).join(", ") + (invalid.length > 5 ? " and " + (invalid.length - 5) + " more" : "") + "." : "";
+  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped, "info");
 }
 
 async function runScan(ids) {
@@ -305,7 +306,9 @@ function buildChangeList(changes) {
     const li = el("li", "change");
     li.appendChild(severityTag(c.severity));
     li.appendChild(el("span", "change__kind", CHANGE_LABEL[c.kind] || c.kind));
-    if (c.value) li.appendChild(el("span", "change__value mono", c.value));
+    if (c.label) li.appendChild(el("span", "change__ext", c.label));
+    if (c.value && c.value !== c.id) li.appendChild(el("span", "change__value mono", c.value));
+    if (c.at) li.appendChild(el("span", "change__at", new Date(c.at).toLocaleDateString()));
     list.appendChild(li);
   }
   wrap.appendChild(list);
@@ -321,7 +324,7 @@ function buildWatchExtensions(extensions) {
   const table = el("table", "watch-table");
   const thead = el("thead");
   const headRow = el("tr");
-  for (const h of ["Extension", "Risk", "Score", "Version"]) headRow.appendChild(el("th", null, h));
+  for (const h of ["Extension", "Access", "Score", "Version"]) headRow.appendChild(el("th", null, h));
   thead.appendChild(headRow);
   table.appendChild(thead);
   const tbody = el("tbody");
@@ -349,9 +352,14 @@ function renderWatchlist(data, token) {
   link.href = "/w/" + token;
   link.textContent = window.location.origin + "/w/" + token;
   const changes = $("#watchChanges");
-  changes.replaceChildren(buildChangeList(data && data.changes));
+  const names = {};
+  for (const [id, snap] of Object.entries((data && data.snapshots) || {})) names[id] = snap && snap.manifest ? snap.manifest.name : id;
+  const named = ((data && data.changes) || []).slice().reverse().map((c) => Object.assign({}, c, { label: names[c.id] || c.id }));
+  changes.replaceChildren(buildChangeList(named));
   const exts = $("#watchExtensions");
-  const list = data && Array.isArray(data.extensions) ? data.extensions : [];
+  // The API keys snapshots by extension ID; show them in the order the list was created.
+  const snaps = (data && data.snapshots) || {};
+  const list = ((data && data.ids) || Object.keys(snaps)).map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
 }
 
@@ -458,7 +466,8 @@ function wireTryForm() {
     try {
       const results = await runScan(ids);
       lastIds = ids;
-      renderResults(results);
+      const invalid = $("#tryInput").value.split(/\s+/).filter(Boolean).filter((line) => parseIds(line).length === 0);
+      renderResults(results, invalid);
       $("#watchForm").hidden = false;
       setStatus($("#watchStatus"), "", null);
       showView("workspace");

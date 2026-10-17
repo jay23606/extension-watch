@@ -836,3 +836,17 @@ button:focus-visible,
     transition: none !important;
   }
 }
+
+.page-note {
+  max-width: 68ch;
+  margin: 8px 0 24px;
+  color: var(--muted, #8A96B0);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* Let the results table scroll inside its card on phones instead of widening the page. */
+.table-wrap { max-width: 100%; min-width: 0; position: relative; }
+main, section, .view, .container { min-width: 0; }
+.change__ext { font-weight: 600; }
+.change__at { color: var(--muted, #8A96B0); font-size: 13px; margin-left: auto; }
