@@ -1,6 +1,6 @@
 # Extension Watch
 
-![Extension Watch](docs/cover.jpg)
+<img src="docs/cover.jpg" alt="Extension Watch" width="800">
 
 Know what your team's Chrome extensions can do, and hear about it when that changes. Built by Michael Lip ([github.com/theluckystrike](https://github.com/theluckystrike)), who maintains 108 Chrome extensions with more than 150,000 users. Live at https://extension-watch.lipmichal.workers.dev
 
@@ -22,11 +22,11 @@ The grade measures access, not intent. A password manager needs to read every pa
 
 Scan results: each extension's access grade, its highest finding, and a details drawer with every rule that fired.
 
-![Scan results](docs/results.png)
+<img src="docs/results.png" alt="Scan results" width="800">
 
 A watchlist: the private link (blurred here), the change log, the extensions and the alert webhook.
 
-![Watchlist](docs/watchlist.png)
+<img src="docs/watchlist.png" alt="Watchlist" width="800">
 
 ## How it works
 
