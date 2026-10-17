@@ -1,7 +1,7 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, cachedSnapshot, cacheSnapshot, dueTokens, load, MAX_IDS, newToken, remove, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { allow, cachedSnapshot, cacheSnapshot, dueTokens, IDLE_TTL, load, MAX_IDS, newToken, remove, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
 import { FetchError } from "./types.js";
 import { alertable, sendAlert, webhookProblem } from "./alert.js";
 
@@ -90,6 +90,8 @@ function apply(wl: Watchlist, snaps: Snapshot[], initial: boolean): void {
 async function recheck(kv: Kv, token: string, get: (id: string) => Promise<Snapshot>, origin: string): Promise<void> {
   const wl = await load(kv, token);
   if (!wl) return;
+  // Not opened for 90 days: stop checking, so the KV expiry (renewed only by saves) removes it.
+  if (Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > IDLE_TTL * 1000) return;
   const seen = wl.changes.length;
   apply(wl, await scanMany(wl.ids, get), false);
   await save(kv, token, wl);
@@ -129,7 +131,11 @@ const routes: Record<string, Handler> = {
   },
   "GET /api/watchlists": async (_req, env, rest) => {
     const wl = await load(env.WATCHLISTS, rest);
-    return wl ? Response.json(wl) : Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+    if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+    const today0 = today();
+    if ((wl.viewedAt ?? "").slice(0, 10) !== today0) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, rest, wl); }
+    const { webhook, ...rest2 } = wl;
+    return Response.json({ ...rest2, webhook: webhook ? webhook.replace(/^(https:\/\/[^/]+\/).{4,}$/, "$1...") : null, webhookSet: Boolean(webhook) });
   },
   "DELETE /api/watchlists": async (_req, env, rest) =>
     (await remove(env.WATCHLISTS, rest)) ? Response.json({ deleted: true }) : Response.json({ error: "This watchlist does not exist." }, { status: 404 }),
@@ -141,7 +147,7 @@ const routes: Record<string, Handler> = {
     if (problem) throw new FetchError(400, problem);
     wl.webhook = raw || null;
     await save(env.WATCHLISTS, rest, wl);
-    return Response.json({ webhook: wl.webhook });
+    return Response.json({ webhook: Boolean(wl.webhook) });
   },
   "POST /api/test-alert": async (req, env) => {
     const token = String((await json<{ token?: unknown }>(req)).token ?? "");

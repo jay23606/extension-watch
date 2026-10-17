@@ -858,3 +858,5 @@ main, section, .view, .container { min-width: 0; }
 .alert-form__row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .alert-form__row .watch-form__input { flex: 1 1 280px; min-width: 0; }
 #workspaceEmpty { padding: 20px; margin-bottom: 16px; }
+.watch-ext { overflow-x: auto; max-width: 100%; }
+.card { min-width: 0; max-width: 100%; }

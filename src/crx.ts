@@ -4,6 +4,8 @@ const DOWNLOAD_TIMEOUT_MS = 8000;
 const MAX_CRX_BYTES = 60 * 1024 * 1024;
 const STREAM_LIMIT = 40 * 1024 * 1024;
 const LOCALE_SCAN_BYTES = 8 * 1024 * 1024;
+const MAX_CHUNKS = 1_000_000;
+const MAX_BLOCKS = 1_000_000;
 const UNSIZED_ENTRY_BYTES = 1024 * 1024;
 const MAXBITS = 15;
 
@@ -101,7 +103,9 @@ class Inflater {
 
   run(): Uint8Array {
     let last = false;
-    while (!last) {
+    // Each block emits at least one byte or reads at least 3 bits; MAX_BLOCKS bounds a corrupt stream.
+    for (let block = 0; !last; block++) {
+      if (block >= MAX_BLOCKS) throw new FetchError(400, "Corrupt deflate data");
       last = this.bits(1) === 1;
       const type = this.bits(2);
       if (type === 0) this.storedBlock();
@@ -118,7 +122,7 @@ class Inflater {
 
   private bits(need: number): number {
     let value = this.bitBuf;
-    while (this.bitCount < need) {
+    for (let k = 0; k < 4 && this.bitCount < need; k++) {
       value |= (this.input[this.inputPos++] ?? 0) << this.bitCount;
       this.bitCount += 8;
     }
@@ -157,8 +161,9 @@ class Inflater {
 
   private codes(lit: Huffman, dist: Huffman): void {
     let sym = this.decode(lit);
-    while (sym !== 256) {
-      if (this.output.length > MAX_CRX_BYTES) throw new FetchError(400, "Output too large");
+    // Every symbol adds at least one output byte, and output is capped, so MAX_CRX_BYTES + 1 iterations bound the loop.
+    for (let n = 0; sym !== 256; n++) {
+      if (n > MAX_CRX_BYTES || this.output.length > MAX_CRX_BYTES) throw new FetchError(400, "Output too large");
       if (sym < 0) throw new FetchError(400, "Corrupt deflate data");
       if (sym < 256) {
         this.output.push(sym);
@@ -185,7 +190,8 @@ class Inflater {
     const clTree = buildHuffman(clLengths);
     const lengths = new Array<number>(hlit + hdist).fill(0);
     let i = 0;
-    while (i < hlit + hdist) {
+    // Each code length symbol advances i by at least 1; at most hlit + hdist (<= 320) steps.
+    for (let step = 0; i < hlit + hdist && step < 320; step++) {
       const sym = this.decode(clTree);
       if (sym < 0) throw new FetchError(400, "Corrupt deflate data");
       if (sym < 16) {
@@ -358,7 +364,7 @@ class StreamBuffer {
     const need = this.size + chunk.length;
     if (need > this.store.length) {
       let cap = this.store.length * 2;
-      while (cap < need) cap *= 2;
+      for (let k = 0; k < 40 && cap < need; k++) cap *= 2;
       const next = new Uint8Array(cap);
       next.set(this.store.subarray(0, this.size));
       this.store = next;
@@ -381,7 +387,7 @@ type Wanted = "manifest" | "locale" | "en" | null;
 interface LocalEntry { name: string; method: number; dataStart: number; dataEnd: number; }
 
 async function ensure(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, need: number): Promise<boolean> {
-  while (buf.size < need && buf.size < STREAM_LIMIT) {
+  for (let chunk = 0; chunk < MAX_CHUNKS && buf.size < need && buf.size < STREAM_LIMIT; chunk++) {
     const { value, done } = await reader.read();
     if (done) return false;
     buf.append(value);
@@ -420,7 +426,8 @@ async function entryData(buf: StreamBuffer, reader: ReadableStreamDefaultReader<
 async function findLocal(buf: StreamBuffer, reader: ReadableStreamDefaultReader<Uint8Array>, from: number, name: string): Promise<number> {
   const target = new TextEncoder().encode(name);
   let i = from;
-  for (;;) {
+  // Each pass advances i by at least one byte or reads at least one more chunk, inside an 8 MB window.
+  for (let pass = 0; pass < LOCALE_SCAN_BYTES * 2; pass++) {
     const data = buf.slice();
     i = data.indexOf(0x50, i);
     if (i < 0 || i + 30 + target.length > data.length) {
@@ -433,6 +440,7 @@ async function findLocal(buf: StreamBuffer, reader: ReadableStreamDefaultReader<
     if (u32le(data, i) === 0x04034b50 && u16le(data, i + 26) === target.length && target.every((b, k) => data[i + 30 + k] === b)) return i;
     i++;
   }
+  return -1;
 }
 
 /** Display name from the extension's Web Store page title, used when the locale file is too deep in a large package. */
@@ -461,16 +469,6 @@ export async function storeTitle(id: string, fetchFn: typeof fetch = globalThis.
 
 function decodeEntities(s: string): string {
   return s.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-}
-
-async function readWhole(reader: ReadableStreamDefaultReader<Uint8Array>, buf: StreamBuffer, id: string): Promise<Manifest> {
-  let chunk = await reader.read();
-  while (!chunk.done) {
-    buf.append(chunk.value);
-    if (buf.size > MAX_CRX_BYTES) throw new FetchError(413, "Extension package exceeds 60 MB");
-    chunk = await reader.read();
-  }
-  return parseCrx(buf.slice(), id);
 }
 
 function inflateEntry(data: Uint8Array, method: number): Uint8Array {
@@ -654,7 +652,7 @@ function stripComments(json: string): string {
   let out = "";
   let i = 0;
   let inString = false;
-  while (i < json.length) {
+  for (let guard = 0; i < json.length && guard <= json.length; guard++) {
     const c = json[i]!;
     if (inString) {
       out += c;
@@ -675,12 +673,12 @@ function stripComments(json: string): string {
     }
     if (c === "/" && json[i + 1] === "/") {
       i += 2;
-      while (i < json.length && json[i] !== "\n") i++;
+      for (; i < json.length && json[i] !== "\n"; i++);
       continue;
     }
     if (c === "/" && json[i + 1] === "*") {
       i += 2;
-      while (i < json.length - 1 && !(json[i] === "*" && json[i + 1] === "/")) i++;
+      for (; i < json.length - 1 && !(json[i] === "*" && json[i + 1] === "/"); i++);
       i += 2;
       continue;
     }

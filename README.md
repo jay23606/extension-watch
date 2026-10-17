@@ -11,23 +11,25 @@ Every company runs dozens of browser extensions that nobody reviewed. Extensions
 1. Paste the extension IDs or Chrome Web Store links your team uses.
 2. Extension Watch reads each extension's current package straight from Google's public update service. It does not trust store listings; it reads the manifest the browser itself would run.
 3. It grades each extension's access from A (little) to F (a lot) with a published rule set, and lists every finding with its points.
-4. "Watch this list" saves a private link. Every day it reads every extension again and records each change: a permission added or removed, new site access, a manifest version change, an extension pulled from the store.
+4. "Watch this list" saves a private link. Every day it reads every extension again and records each change: a permission or site access added, content scripts that reach new sites, a looser script policy, updates moved off the Web Store, a jump in the access score, a new version, an extension pulled from the store.
+5. Add a Slack or Discord webhook (or any https endpoint that takes JSON) and changes of medium severity or higher arrive as one message after each check.
 
 The grade measures access, not intent. A password manager needs to read every page, so it grades F, and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
 
 ## How it works
 
 ```
-Browser ── /api/scan ──────────► Cloudflare Worker ──► Google update service (CRX package, HTTP ranges)
-        ── /api/watchlists ───►        │  parse manifest + locales, grade, diff
-        ◄── /w/<private link> ──       └─► Workers KV (one record per watchlist)
-Daily Cron Trigger ── re-reads every watched extension, records changes
+Browser ── /api/scan ──────────► Cloudflare Worker ──► Google update service (CRX package, streamed)
+        ── /api/watchlists ───►        │  find manifest + locale, grade, diff
+        ◄── /w/<private link> ──       ├─► Workers KV: one record per watchlist + one shared record per extension per day
+Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, oldest first ──► webhook alerts
 ```
 
 - No browser extension to install and no agent on employee machines. The service only needs extension IDs.
-- Packages are read with HTTP range requests. For a 25 MB package (Bitwarden), Extension Watch reads the ZIP directory at the end of the file and then only `manifest.json` and the locale files, not the whole package. A tested fixture reads less than a quarter of a 3 MB package.
-- The ZIP and DEFLATE decoding is written in the Worker, with no zip library.
-- Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50.
+- Packages are streamed, never stored. Google ignores range requests for large packages, so the Worker reads the stream until it finds the `manifest.json` header, inflates that entry, and stops; the locale file is looked for in the first 8 MB only. If the name is still a locale key, the display name comes from the extension's Web Store page. AdBlock (78 MB) reads in about 2.4 s from 9 MB of data; when Google does honour ranges, only the needed parts are fetched.
+- The ZIP and DEFLATE decoding is written in the Worker, with no zip library. It handles CRX2, CRX3, data-descriptor entries, comments and a BOM in manifests.
+- Each extension is downloaded at most once a day, whatever the number of watchlists that contain it. In a test with 600 watchlists sharing one extension, one cron run checked all 600 with 1 download.
+- Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50. Each address may run 200 scans and create 20 watchlists a day.
 
 ## Methodology
 
@@ -35,31 +37,36 @@ The full points table is public at `/api/rules` and on the Methodology page. Exa
 
 | Finding | Points |
 |---|---|
-| Access to all websites (`<all_urls>`, `*://*/*`) | 30 |
+| Access to all websites (`<all_urls>`, `*://*/*`, `https://*/`) | 30 |
 | `debugger` | 30 |
 | Content scripts on all sites | 20 |
-| `nativeMessaging`, `userScripts` | 20 each |
+| `nativeMessaging`, `userScripts`, blocking `webRequest` | 20 each |
+| Script policy that allows `'unsafe-eval'` or remote script | 20 |
 | `cookies`, `management`, `proxy` | 15 each |
+| Updates from a server other than Google | 15 |
 | Manifest V2 (deprecated) | 10 |
 
-Grades: 0 to 19 A, 20 to 39 B, 40 to 59 C, 60 to 79 D, 80 and above F. Optional permissions are listed but do not count, because the browser does not grant them at install. Every rule is deterministic: the same manifest always gives the same grade, and no model is involved.
+Rules that describe the same power are grouped, and a group counts once at its highest value. For example, broad host access, content scripts on all sites and script injection all mean "can run code on every site", so together they count 30, not 58. Grades: 0 to 19 A, 20 to 39 B, 40 to 59 C, 60 to 79 D, 80 and above F. Optional permissions are listed as "can request later" with 0 points, because the browser does not grant them at install. Every rule is deterministic: the same manifest always gives the same grade, and no model is involved.
+
+Checked against 50 popular extensions in production: 46 read (the other 4 are no longer in the store), graded 9 A, 12 B, 16 C, 6 D and 3 F, with no `'wasm-unsafe-eval'` policy mistaken for `'unsafe-eval'`.
 
 ## Privacy and security
 
 - Stored per watchlist: a name you choose, extension IDs, manifest snapshots and the change log. No email, no user account, no employee data.
-- The private link is 32 random bytes (base64url). It is the only key; the service has no list of watchlists that anyone can browse.
-- The Worker only fetches from Google's update service. Extension IDs are validated (32 characters a to p) before any request.
-- Text from manifests is rendered with `textContent`, never as HTML.
+- The private link is 32 random bytes (base64url). It is the only key; the service has no list of watchlists that anyone can browse. The owner of a link can delete the watchlist. A list nobody opens for 90 days stops being checked and then expires. The saved webhook URL is never shown back in full, because a chat webhook lets anyone who has it post to the channel.
+- The Worker fetches only from Google (update service and Web Store page) and from the one webhook a watchlist owner sets. Extension IDs are validated (32 characters a to p) before any request; webhooks must be public https URLs, and redirects are not followed.
+- The API accepts JSON only, so a form on another site cannot start scans in a visitor's browser.
+- Pages are served with a strict Content Security Policy (no inline script, no eval), `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`. Text from manifests is rendered with `textContent`, never as HTML.
 
-## Pricing
+## Pricing (planned; billing is not connected in this version)
 
 | Plan | Price | For |
 |---|---|---|
 | Free | 0 | 10 extensions, weekly check |
-| Team | 29 USD a month | 250 extensions, daily checks, email and Slack alerts, CSV export |
+| Team | 29 USD a month | 250 extensions, daily checks, Slack and email alerts, CSV export |
 | Business | 99 USD a month | Unlimited extensions, SSO, policy export for Chrome Enterprise, audit log |
 
-The cost to serve a watchlist is a few range requests per extension per day on Cloudflare Workers, so the gross margin on Team stays above 90 percent. Revenue grows with the number of extensions watched, which grows with company size.
+The cost to serve a watchlist is at most one streamed download per extension per day on Cloudflare Workers, shared across every customer who watches that extension, so the gross margin on Team stays above 90 percent. Revenue grows with the number of extensions watched, which grows with company size.
 
 ## Run it
 
@@ -67,7 +74,7 @@ The cost to serve a watchlist is a few range requests per extension per day on C
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npx tsx --test test/*.test.ts                 # 64 tests, no network
+npx tsx --test test/*.test.ts                 # 99 tests, no network
 ```
 
 ## License

@@ -1,6 +1,6 @@
 import type { LoggedChange, Watchlist } from "./store.js";
 
-// Outgoing alerts. One https webhook per watchlist: Slack and Discord get chat JSON, ntfy.sh gets a plain-text push.
+// Outgoing alerts. One https webhook per watchlist. The JSON body carries `text` (Slack) and `content` (Discord).
 // The payload holds only the watchlist name and public extension data. Redirects are not followed.
 
 const LABEL: Record<string, string> = {

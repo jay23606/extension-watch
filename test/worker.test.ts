@@ -50,3 +50,28 @@ test("a takedown is a completed check and is recorded only once", () => {
   assert.equal(wl.changes.filter((c) => c.kind === "removed_from_store").length, 1);
   assert.notEqual(wl.lastCheck, "2026-01-01T00:00:00Z");
 });
+
+test("reads mask the webhook and record the view; idle lists are not re-checked", async () => {
+  const mod = await import("../src/worker.js");
+  const store = new Map<string, string>();
+  const kv = { get: async (k: string) => store.get(k) ?? null, put: async (k: string, v: string) => { store.set(k, v); }, delete: async (k: string) => { store.delete(k); },
+    list: async () => ({ keys: [...store.keys()].filter((k) => k.startsWith("wl:")).map((name) => ({ name, metadata: { lastCheck: "2026-01-01T00:00:00Z" } })), list_complete: true }) };
+  const token = "A".repeat(43);
+  const wl = { ...list(), webhook: "https://hooks.slack.com/services/T000/B000/secretsecret", createdAt: "2026-01-01T00:00:00Z" };
+  applySnapshots(wl, [snap(man())], true);
+  wl.lastCheck = "2026-01-01T00:00:00Z";
+  store.set("wl:" + token, JSON.stringify(wl));
+  let fetched = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => { fetched++; return new Response(null, { status: 204 }); }) as typeof fetch;
+  try {
+    const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+    await mod.default.scheduled({}, env as never);
+    assert.equal(fetched, 0, "idle for more than 90 days: not re-checked");
+    const res = await mod.default.fetch(new Request("http://x/api/watchlists/" + token), env as never);
+    const body = await res.json() as { webhook: string; webhookSet: boolean };
+    assert.equal(body.webhookSet, true);
+    assert.ok(!body.webhook.includes("secret"));
+    assert.ok(JSON.parse(store.get("wl:" + token)!).viewedAt);
+  } finally { globalThis.fetch = real; }
+});

@@ -4,7 +4,7 @@ import type { Assessment, Change, Manifest } from "./types.js";
 // (key ext:<id>). The 32-byte random token in the link is the only key to a watchlist; no personal data is stored.
 export interface Snapshot { id: string; manifest: Manifest | null; assessment: Assessment | null; error: string | null; checkedAt: string }
 export type LoggedChange = Omit<Change, "kind"> & { kind: string; id: string; at: string };
-export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; createdAt: string; lastCheck: string; webhook?: string | null }
+export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string }
 export interface Kv {
   get(k: string): Promise<string | null>;
   put(k: string, v: string, o?: { expirationTtl?: number; metadata?: unknown }): Promise<void>;
@@ -14,7 +14,7 @@ export interface Kv {
 
 export const MAX_IDS = 50;
 export const MAX_CHANGES = 200;
-const IDLE_TTL = 90 * 86400; // idle lists expire after 90 days; every save renews it
+export const IDLE_TTL = 90 * 86400; // every save renews it; the scheduler stops saving lists nobody opened for 90 days, so they expire
 const CACHE_TTL = 3 * 86400;
 
 export function newToken(): string {

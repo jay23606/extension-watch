@@ -363,7 +363,7 @@ function renderWatchlist(data, token) {
   const link = $("#watchLink");
   link.href = "/w/" + token;
   link.textContent = window.location.origin + "/w/" + token;
-  wireAlerts(token, data && data.webhook);
+  wireAlerts(token, data && data.webhookSet ? data.webhook : null);
   let del = document.getElementById("watchDelete");
   if (!del) {
     del = el("button", "btn btn--ghost", "Delete this watchlist");
@@ -393,13 +393,18 @@ function wireAlerts(token, webhook) {
   const form = $("#alertForm");
   const input = $("#alertUrl");
   const status = $("#alertStatus");
-  input.value = webhook || "";
+  input.value = "";
+  input.placeholder = webhook ? "Saved: " + webhook + " Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
   form.onsubmit = async (event) => {
     event.preventDefault();
+    if (!input.value.trim() && webhook && !window.confirm("Turn off alerts for this watchlist?")) return;
     try {
       const res = await apiJson("/api/watchlists/" + encodeURIComponent(token), {
         method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ webhook: input.value.trim() }),
       });
+      webhook = res.webhook ? input.value.trim().replace(/^(https:\/\/[^/]+\/).{4,}$/, "$1...") : null;
+      input.value = "";
+      input.placeholder = webhook ? "Saved: " + webhook + " Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
       setStatus(status, res.webhook ? "Saved. Changes will be sent to this webhook." : "Alerts turned off.", "info");
     } catch (err) {
       setStatus(status, err.message, "error");
