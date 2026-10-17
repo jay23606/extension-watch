@@ -63,7 +63,7 @@ test("Google Translate manifest scores 55, grade C", () => {
   assert.equal(a.findings[0]!.code, "broad_hosts");
   assert.equal(a.findings[1]!.code, "scripting");
   assert.equal(a.findings[1]!.points, 25);
-  assert.equal(a.summary, "Highest risk: Broad host access and Script injection.");
+  assert.equal(a.summary, "Highest access: Broad host access and Script injection.");
 });
 
 test("scripting without broad hosts is 8 points medium", () => {
@@ -202,7 +202,7 @@ test("score is capped at 100 with grade F", () => {
 
 test("summary names the single top finding", () => {
   const a = assess(manifest({ permissions: ["debugger"] }));
-  assert.equal(a.summary, "Highest risk: Debugger access.");
+  assert.equal(a.summary, "Highest access: Debugger access.");
 });
 
 test("gradeFor boundaries are correct", () => {

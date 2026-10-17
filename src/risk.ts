@@ -103,7 +103,7 @@ function cspUnsafe(csp: string | null): boolean {
 function summarize(findings: Finding[]): string {
   const [first, second] = findings;
   if (!first) return "No notable risk permissions.";
-  return second ? `Highest risk: ${first.title} and ${second.title}.` : `Highest risk: ${first.title}.`;
+  return second ? `Highest access: ${first.title} and ${second.title}.` : `Highest access: ${first.title}.`;
 }
 
 export function assess(m: Manifest): Assessment {

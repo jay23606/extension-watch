@@ -106,7 +106,7 @@ function manifestCrx(manifest: unknown, extraFiles: { name: string; data: Uint8A
 const ID = "aapbdbdomjkkjkaonfhkkikfgjllcleb";
 
 function okResponse(body: Uint8Array, status = 200): Response {
-  return new Response(body, { status });
+  return new Response(body as unknown as BodyInit, { status });
 }
 
 function fakeFetch(response: Response, captured?: { url: string }): typeof fetch {
@@ -230,8 +230,9 @@ test("parseCrx splits host patterns out of permissions", () => {
   });
   const m = parseCrx(bytes, ID);
   assert.deepEqual(m.permissions, ["tabs"]);
-  assert.deepEqual(m.optionalPermissions, ["cookies"]);
-  assert.deepEqual(m.hostPermissions, ["https://*.foo.com/*", "<all_urls>", "http://bar.com/*"]);
+  assert.deepEqual(m.optionalPermissions, ["cookies", "http://bar.com/*"]);
+  assert.deepEqual(m.hostPermissions, ["https://*.foo.com/*", "<all_urls>"]);
+  assert.ok(m.optionalPermissions.includes("http://bar.com/*"), "optional hosts are kept apart from granted hosts");
   assert.equal(m.hasBackground, true);
   assert.equal(m.csp, "script-src 'self' 'unsafe-eval'; object-src 'self'");
 });
@@ -307,7 +308,7 @@ test("fetchManifest throws FetchError 404 on an empty body", async () => {
 });
 
 test("fetchManifest throws FetchError 413 on an oversize package", async () => {
-  const big = new Response(new Uint8Array(20 * 1024 * 1024 + 1));
+  const big = new Response(new Uint8Array(60 * 1024 * 1024 + 1) as unknown as BodyInit);
   await assert.rejects(fetchManifest(ID, fakeFetch(big)), (err: unknown) => {
     return err instanceof FetchError && err.status === 413;
   });
@@ -323,4 +324,28 @@ test("fetchManifest throws FetchError on an invalid id", async () => {
   await assert.rejects(fetchManifest("junk", fakeFetch(okResponse(new Uint8Array(0)))), (err: unknown) => {
     return err instanceof FetchError && err.status === 400;
   });
+});
+
+/** Serves byte ranges of a package the way the Chrome Web Store CDN does (206 + Content-Range). */
+function rangeFetch(body: Uint8Array, log: string[]): typeof fetch {
+  return (async (_url: string | URL | Request, init?: RequestInit) => {
+    const range = new Headers(init?.headers).get("range") ?? "";
+    const m = /bytes=(\d+)-(\d+)/.exec(range);
+    if (!m) return new Response(body as unknown as BodyInit, { status: 200 });
+    const start = Number(m[1]); const end = Math.min(body.length - 1, Number(m[2]));
+    log.push(`${start}-${end}`);
+    return new Response(body.slice(start, end + 1) as unknown as BodyInit, { status: 206, headers: { "content-range": `bytes ${start}-${end}/${body.length}` } });
+  }) as unknown as typeof fetch;
+}
+
+test("fetchManifest reads a large package with range requests only", async () => {
+  const filler = new Uint8Array(3 * 1024 * 1024).map((_, i) => (i * 7919) % 251); // incompressible, 3 MB
+  const bytes = manifestCrx({ manifest_version: 3, name: "__MSG_appName__", version: "9.9", default_locale: "de", permissions: ["storage"] },
+    [{ name: "big.bin", data: filler, method: 0 }, { name: "_locales/de/messages.json", data: jsonBytes({ appname: { message: "Grosse Erweiterung" } }) }]);
+  const log: string[] = [];
+  const m = await fetchManifest("aapbdbdomjkkjkaonfhkkikfgjllcleb", rangeFetch(bytes, log));
+  assert.equal(m.name, "Grosse Erweiterung");
+  assert.equal(m.version, "9.9");
+  const fetched = log.reduce((sum, r) => { const [a, b] = r.split("-").map(Number); return sum + (b! - a! + 1); }, 0);
+  assert.ok(fetched < bytes.length / 4, `read ${fetched} of ${bytes.length} bytes`);
 });

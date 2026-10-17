@@ -1,7 +1,7 @@
 import { FetchError, type Manifest } from "./types";
 
 const DOWNLOAD_TIMEOUT_MS = 8000;
-const MAX_CRX_BYTES = 20 * 1024 * 1024;
+const MAX_CRX_BYTES = 60 * 1024 * 1024;
 const MAXBITS = 15;
 
 const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
@@ -285,24 +285,79 @@ function readLocalData(zip: Uint8Array, localOffset: number, compSize: number): 
   return zip.subarray(start, start + compSize);
 }
 
+const TAIL_BYTES = 256 * 1024;
+
+type Ranged = (start: number, end: number) => Promise<Uint8Array>;
+
+/** Central directory entries: name -> local header offset (relative to the ZIP start). */
+function centralEntries(zip: Uint8Array): Map<string, { local: number; size: number }> {
+  const out = new Map<string, { local: number; size: number }>();
+  const eocd = findEocd(zip);
+  if (eocd < 0) throw new FetchError(400, "Invalid ZIP");
+  let off = u32le(zip, eocd + 16);
+  for (let i = 0, n = u16le(zip, eocd + 10); i < n; i++) {
+    if (u32le(zip, off) !== 0x02014b50) throw new FetchError(400, "Invalid ZIP central directory");
+    const nameLen = u16le(zip, off + 28);
+    out.set(decodeUtf8(zip.subarray(off + 46, off + 46 + nameLen)), { local: u32le(zip, off + 42), size: u32le(zip, off + 20) });
+    off += 46 + nameLen + u16le(zip, off + 30) + u16le(zip, off + 32);
+  }
+  return out;
+}
+
+/**
+ * Large packages (password managers are 25 MB and more) are read with HTTP range requests into a sparse buffer:
+ * the head, the ZIP directory at the end, then only manifest.json and the locale files. The existing parser then
+ * runs unchanged on the sparse buffer, because it only touches those regions.
+ */
+async function sparseManifest(total: number, head: Uint8Array, get: Ranged, id: string): Promise<Manifest> {
+  const buf = new Uint8Array(total);
+  buf.set(head, 0);
+  const tailStart = Math.max(head.length, total - TAIL_BYTES);
+  buf.set(await get(tailStart, total - 1), tailStart);
+  const zipStart = crxZipOffset(buf);
+  const zip = buf.subarray(zipStart);
+  const eocd = findEocd(zip);
+  if (eocd < 0) throw new FetchError(400, "Invalid ZIP");
+  const cdStart = zipStart + u32le(zip, eocd + 16);
+  if (cdStart < tailStart) buf.set(await get(cdStart, tailStart - 1), cdStart);
+  const entries = centralEntries(zip);
+  const fill = async (name: string) => {
+    const e = entries.get(name);
+    if (!e) return;
+    const from = zipStart + e.local;
+    buf.set(await get(from, Math.min(total - 1, from + 30 + 1024 + e.size)), from);
+  };
+  await fill("manifest.json");
+  const raw = readZipEntry(zip, "manifest.json");
+  const locale = raw ? (/"default_locale"\s*:\s*"([^"]+)"/.exec(decodeUtf8(raw))?.[1] ?? null) : null;
+  if (locale) await Promise.all([fill(`_locales/${locale}/messages.json`), fill("_locales/en/messages.json")]);
+  return parseCrx(buf, id);
+}
+
 export async function fetchManifest(id: string, fetchFn?: typeof fetch): Promise<Manifest> {
   const normalized = normalizeId(id);
   if (!normalized) throw new FetchError(400, "Invalid extension id");
   const impl = fetchFn ?? globalThis.fetch;
   const url = `https://clients2.google.com/service/update2/crx?response=redirect&prodversion=141.0.0.0&acceptformat=crx2,crx3&x=id%3D${normalized}%26uc`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
-  try {
-    const response = await impl(url, { redirect: "follow", signal: controller.signal });
-    if (response.status === 204) throw new FetchError(404, "Not on the Chrome Web Store");
-    if (!response.ok) throw new FetchError(response.status, `Download failed: HTTP ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength === 0) throw new FetchError(404, "Not on the Chrome Web Store");
-    if (buffer.byteLength > MAX_CRX_BYTES) throw new FetchError(413, "Extension package exceeds 20 MB");
-    return parseCrx(new Uint8Array(buffer), normalized);
-  } finally {
-    clearTimeout(timer);
+  const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+  const first = await impl(url, { redirect: "follow", signal, headers: { range: "bytes=0-65535" } });
+  if (first.status === 204) throw new FetchError(404, "Not on the Chrome Web Store");
+  if (!first.ok) throw new FetchError(first.status, `Download failed: HTTP ${first.status}`);
+  const head = new Uint8Array(await first.arrayBuffer());
+  if (head.byteLength === 0) throw new FetchError(404, "Not on the Chrome Web Store");
+  const total = Number(/\/(\d+)$/.exec(first.headers.get("content-range") ?? "")?.[1] ?? "0");
+  if (first.status !== 206 || !total || total <= head.byteLength) {
+    if (head.byteLength > MAX_CRX_BYTES) throw new FetchError(413, "Extension package exceeds 60 MB");
+    return parseCrx(head, normalized); // the server sent the whole package
   }
+  if (total > 200 * 1024 * 1024) throw new FetchError(413, "Extension package exceeds 200 MB");
+  const finalUrl = first.url || url;
+  const get: Ranged = async (start, end) => {
+    const r = await impl(finalUrl, { redirect: "follow", signal, headers: { range: `bytes=${start}-${end}` } });
+    if (r.status !== 206) throw new FetchError(502, "The Chrome Web Store did not return the requested part");
+    return new Uint8Array(await r.arrayBuffer());
+  };
+  return sparseManifest(total, head, get, normalized);
 }
 
 function buildManifest(raw: Record<string, unknown>, id: string, messages: Record<string, { message: string }> | null): Manifest {
@@ -315,7 +370,8 @@ function buildManifest(raw: Record<string, unknown>, id: string, messages: Recor
   const optApi: string[] = [];
   const optHost: string[] = [];
   for (const p of optional) (isHostPattern(p) ? optHost : optApi).push(p);
-  const hostPermissions = dedupe([...asStringArray(raw.host_permissions), ...hostFromPerms, ...optHost]);
+  // Optional hosts are not granted at install; keep them apart so they do not inflate the access score.
+  const hostPermissions = dedupe([...asStringArray(raw.host_permissions), ...hostFromPerms]);
   const csp = extractCsp(raw.content_security_policy);
   return {
     id,
@@ -323,7 +379,7 @@ function buildManifest(raw: Record<string, unknown>, id: string, messages: Recor
     version: typeof raw.version === "string" ? raw.version : "",
     manifestVersion: typeof raw.manifest_version === "number" ? raw.manifest_version : 0,
     permissions: dedupe(apiPerms),
-    optionalPermissions: dedupe(optApi),
+    optionalPermissions: dedupe([...optApi, ...asStringArray(raw.optional_host_permissions), ...optHost]),
     hostPermissions,
     contentScriptMatches: collectMatches(raw.content_scripts),
     externallyConnectable: collectExternallyConnectable(raw.externally_connectable),

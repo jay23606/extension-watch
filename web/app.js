@@ -167,22 +167,18 @@ function buildDrawer(item) {
   return wrap;
 }
 
-function buildResultRow(item) {
-  const frag = document.createDocumentFragment();
-  const detailCols = 5;
+function buildErrorRow(item) {
+  const row = el("tr", "result result--error");
+  const cell = el("td", "result__cell");
+  cell.colSpan = 5;
+  cell.appendChild(el("span", "muted", "Could not load"));
+  if (item.id) cell.appendChild(el("span", "mono result__cell-id", " " + item.id));
+  cell.appendChild(el("span", "severity severity--red", item.error));
+  row.appendChild(cell);
+  return row;
+}
 
-  if (item.error) {
-    const row = el("tr", "result result--error");
-    const cell = el("td", "result__cell");
-    cell.colSpan = detailCols;
-    cell.appendChild(el("span", "muted", "Could not load"));
-    if (item.id) cell.appendChild(el("span", "mono result__cell-id", " " + item.id));
-    cell.appendChild(el("span", "severity severity--red", item.error));
-    row.appendChild(cell);
-    frag.appendChild(row);
-    return frag;
-  }
-
+function buildSummaryRow(item) {
   const m = item.manifest;
   const a = item.assessment;
   const name = (m && m.name) || item.id || "Unknown";
@@ -223,16 +219,28 @@ function buildResultRow(item) {
   detailsCell.appendChild(btn);
   row.appendChild(detailsCell);
 
+  return row;
+}
+
+function buildResultRow(item) {
+  const frag = document.createDocumentFragment();
+  if (item.error) {
+    frag.appendChild(buildErrorRow(item));
+    return frag;
+  }
+
+  const row = buildSummaryRow(item);
   frag.appendChild(row);
 
   const detailRow = el("tr", "result__detail");
   detailRow.hidden = true;
   const detailCell = el("td", "result__detail-cell");
-  detailCell.colSpan = detailCols;
+  detailCell.colSpan = 5;
   detailCell.appendChild(buildDrawer(item));
   detailRow.appendChild(detailCell);
   frag.appendChild(detailRow);
 
+  const btn = row.querySelector(".result__details .btn");
   btn.addEventListener("click", () => {
     const expanded = btn.getAttribute("aria-expanded") === "true";
     btn.setAttribute("aria-expanded", String(!expanded));
@@ -386,9 +394,10 @@ async function loadRules() {
   try {
     const data = await apiJson("/api/rules");
     renderRules(extractRules(data));
+    setStatus($("#rulesStatus"), "", null);
   } catch (err) {
     renderRules([]);
-    setStatus($("#scanStatus"), err.message || "Rules could not be loaded.", "error");
+    setStatus($("#rulesStatus"), err.message || "Rules could not be loaded.", "error");
   }
 }
 
@@ -400,10 +409,7 @@ function showView(name) {
     else btn.removeAttribute("aria-current");
     btn.classList.toggle("nav__link--active", active);
   }
-  if (name !== "watchlist") {
-    const path = name === "landing" ? "/" : "/";
-    history.replaceState(null, "", path);
-  }
+  if (name !== "watchlist") history.replaceState(null, "", "/");
   if (name === "methodology" && !rulesLoaded) {
     rulesLoaded = true;
     loadRules();
