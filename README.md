@@ -135,7 +135,7 @@ The cost to serve a watchlist is at most one streamed download per extension per
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npm test                                      # 182 tests, no network
+npm test                                      # 187 tests, no network
 npm run check                                 # TypeScript with no errors
 ```
 

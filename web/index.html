@@ -128,7 +128,7 @@
       <div class="card">
         <p class="card__hint">
           Each finding is worth points by how much it can reach. Findings that describe the same power (for example broad host access, content scripts on all sites and script injection) form a group, and a group counts once, at its highest value. The score is the sum of the groups, capped at 100. Optional permissions are listed with 0 points because the browser does not grant them at install.
-          Grade bands: 0&ndash;19 A, 20&ndash;39 B, 40&ndash;59 C, 60&ndash;79 D, 80+ F.
+          Grade bands run from 0 to 19 for A, 20 to 39 for B, 40 to 59 for C, 60 to 79 for D, and 80 or more for F.
         </p>
         <div id="rulesWrap" class="rules-wrap"></div>
         <p id="rulesStatus" class="status" role="status" aria-live="polite" hidden></p>
@@ -141,8 +141,8 @@
       <div class="page-head">
         <h1 class="page-title" id="watchTitle">Watchlist</h1>
         <p class="page-sub" id="watchMeta"></p>
-        <p class="watch-link-line"><span id="watchLinkLabel">Read-only link to share: </span><a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
-        <p id="adminNote" class="page-note" hidden>You are on the admin link. Keep it private: it can change alerts and delete this list. Share the read-only link above instead.</p>
+        <p class="watch-link-line"><span id="watchLinkLabel">Read-only link to share </span><a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
+        <p id="adminNote" class="page-note" hidden>You are on the admin link. Keep it private, because it can change alerts and delete this list. Share the read-only link above instead.</p>
         <p id="watchWarning" class="status status--warn" role="status" hidden></p>
         <p id="watchExports" class="watch-actions">
           <a id="exportCsv" class="btn btn--ghost btn--small" href="#" download>Download inventory CSV</a>

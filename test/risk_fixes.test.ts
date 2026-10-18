@@ -165,7 +165,7 @@ test("an optional permission on a sensitive site is labelled and worth 0 points"
   assert.equal(a.findings.length, 1);
   assert.equal(a.findings[0]!.points, 0);
   assert.equal(a.findings[0]!.severity, "low");
-  assert.equal(a.findings[0]!.title, "Can request later: Sensitive site access (https://acme.sharepoint.com/*)");
+  assert.equal(a.findings[0]!.title, "Can request later, sensitive site access (https://acme.sharepoint.com/*)");
 });
 
 test("the new Microsoft 365, Slack, Workday, Atlassian and Google admin hosts are sensitive", () => {

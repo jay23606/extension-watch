@@ -155,8 +155,8 @@ function buildPermissions(m) {
   const chips = el("div", "chips");
   chips.appendChild(el("span", "chip mono", "MV" + m.manifestVersion));
   chips.appendChild(el("span", "chip mono", m.hasBackground ? "background script" : "no background"));
-  chips.appendChild(el("span", "chip mono", m.updateUrl ? "update URL: " + m.updateUrl : "no update URL"));
-  chips.appendChild(el("span", "chip mono", m.csp ? "CSP: " + m.csp : "no CSP"));
+  chips.appendChild(el("span", "chip mono", m.updateUrl ? "update URL " + m.updateUrl : "no update URL"));
+  chips.appendChild(el("span", "chip mono", m.csp ? "CSP " + m.csp : "no CSP"));
   group.appendChild(chips);
   wrap.appendChild(group);
   return wrap;
@@ -279,8 +279,8 @@ function renderResults(results, invalid = [], dropped = 0) {
   for (const item of results) tbody.appendChild(buildResultRow(item));
   const ok = results.filter((r) => !r.error).length;
   const bad = results.length - ok;
-  const skipped = invalid.length ? " Not extension IDs: " + invalid.slice(0, 5).join(", ") + (invalid.length > 5 ? " and " + (invalid.length - 5) + " more" : "") + "." : "";
-  const over = dropped > 0 ? " Only the first 25 were scanned; " + dropped + " more were left out." : "";
+  const skipped = invalid.length ? " These entries are not extension IDs, " + invalid.slice(0, 5).join(", ") + (invalid.length > 5 ? " and " + (invalid.length - 5) + " more" : "") + "." : "";
+  const over = dropped > 0 ? " Only the first 25 were scanned. " + dropped + " more were left out." : "";
   const missing = results.length > 0 && bad > ok ? " Most IDs were not on the Chrome Web Store. Check them and try again." : "";
   setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped + over + missing, missing ? "error" : "info");
 }
@@ -362,7 +362,7 @@ function buildWatchExtensions(extensions) {
     const risk = el("td");
     risk.appendChild(gradeBadge(a && a.grade ? a.grade : "?"));
     tr.appendChild(risk);
-    tr.appendChild(el("td", "mono", a && typeof a.score === "number" ? String(a.score) : "\u2013"));
+    tr.appendChild(el("td", "mono", a && typeof a.score === "number" ? String(a.score) : "-"));
     tr.appendChild(el("td", "mono", m && m.version ? m.version : ""));
     tbody.appendChild(tr);
   }
@@ -425,7 +425,7 @@ function renderWatchlist(data, token) {
   const link = $("#watchLink");
   link.href = "/w/" + shareToken;
   link.textContent = window.location.origin + "/w/" + shareToken;
-  $("#watchLinkLabel").textContent = admin ? "Read-only link to share: " : "Read-only view: ";
+  $("#watchLinkLabel").textContent = admin ? "Read-only link to share " : "Read-only view ";
   $("#adminNote").hidden = !admin;
   $("#alertSection").hidden = !admin;
   $("#watchExports").hidden = false;
@@ -486,7 +486,7 @@ function wireAlerts(token, webhook) {
   const input = $("#alertUrl");
   const status = $("#alertStatus");
   input.value = "";
-  input.placeholder = webhook ? "Saved: " + webhook + " Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
+  input.placeholder = webhook ? "Alerts go to " + webhook + ". Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
   form.onsubmit = async (event) => {
     event.preventDefault();
     if (!input.value.trim() && webhook && !window.confirm("Turn off alerts for this watchlist?")) return;
@@ -496,7 +496,7 @@ function wireAlerts(token, webhook) {
       });
       webhook = res.webhook ? "https://" + new URL(input.value.trim()).hostname + "/..." : null;
       input.value = "";
-      input.placeholder = webhook ? "Saved: " + webhook + " Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
+      input.placeholder = webhook ? "Alerts go to " + webhook + ". Paste a new URL to replace it." : "https://hooks.slack.com/services/...";
       setStatus(status, res.webhook ? "Saved. Changes will be sent to this webhook." : "Alerts turned off.", "info");
     } catch (err) {
       setStatus(status, err.message, "error");

@@ -63,7 +63,7 @@ test("Google Translate manifest scores 30, grade B (capability group max)", () =
   assert.equal(a.findings[0]!.code, "broad_hosts");
   assert.equal(a.findings[1]!.code, "scripting");
   assert.equal(a.findings[1]!.points, 25);
-  assert.equal(a.summary, "Highest access: Broad host access and Script injection.");
+  assert.equal(a.summary, "Highest access is Broad host access and Script injection.");
 });
 
 test("scripting without broad hosts is 8 points medium", () => {
@@ -191,7 +191,7 @@ test("optional permissions are listed as 'can request later' with 0 points (H6)"
   assert.equal(a.score, 0);
   assert.equal(a.grade, "A");
   const titles = a.findings.map((f) => f.title).sort();
-  assert.deepEqual(titles, ["Can request later: cookies", "Can request later: debugger"]);
+  assert.deepEqual(titles, ["Can request later, cookies", "Can request later, debugger"]);
   for (const f of a.findings) {
     assert.equal(f.points, 0);
     assert.equal(f.severity, "low");
@@ -201,7 +201,7 @@ test("optional permissions are listed as 'can request later' with 0 points (H6)"
 test("optional broad host is listed as 'can request later' without inflating the score", () => {
   const a = assess(manifest({ optionalPermissions: ["*://*/*"] }));
   assert.equal(a.score, 0);
-  assert.equal(a.findings[0]!.title, "Can request later: *://*/*");
+  assert.equal(a.findings[0]!.title, "Can request later, *://*/*");
   assert.equal(a.findings[0]!.points, 0);
 });
 
@@ -256,7 +256,7 @@ test("score is capped at 100 with grade F", () => {
 
 test("summary names the single top finding", () => {
   const a = assess(manifest({ permissions: ["debugger"] }));
-  assert.equal(a.summary, "Highest access: Debugger access.");
+  assert.equal(a.summary, "Highest access is Debugger access.");
 });
 
 test("gradeFor boundaries are correct", () => {

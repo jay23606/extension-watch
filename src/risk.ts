@@ -52,7 +52,7 @@ export const RULES: Rule[] = [
   { code: "proxy", group: "proxy", title: "Proxy control", points: 15, severity: severityFor(15), detail: "Controls the browser network proxy." },
   { code: "privacy", group: "privacy", title: "Privacy settings", points: 12, severity: severityFor(12), detail: "Changes privacy-related browser settings." },
   { code: "tabs", group: "tabs", title: "Tabs", points: 6, severity: severityFor(6), detail: "Reads tab URLs and metadata." },
-  { code: "scripting", group: GROUP_CODE_ON_EVERY_SITE, title: "Script injection", points: 8, severity: severityFor(8), detail: "The scripting API injects code; 25 when combined with broad host access." },
+  { code: "scripting", group: GROUP_CODE_ON_EVERY_SITE, title: "Script injection", points: 8, severity: severityFor(8), detail: "The scripting API injects code, worth 25 when combined with broad host access." },
   { code: "clipboard_read", group: "clipboard_read", title: "Clipboard read", points: 10, severity: severityFor(10), detail: "Reads the system clipboard." },
   { code: "screen_capture", group: "screen_capture", title: "Screen capture", points: 12, severity: severityFor(12), detail: "desktopCapture or tabCapture records the screen or tabs." },
   { code: "downloads", group: "downloads", title: "Downloads", points: 6, severity: severityFor(6), detail: "Downloads files to disk." },
@@ -207,7 +207,7 @@ function summarize(findings: Finding[]): string {
   const scored = findings.filter((f) => f.points > 0);
   const [first, second] = scored;
   if (!first) return "No scored permissions.";
-  return second ? `Highest access: ${first.title} and ${second.title}.` : `Highest access: ${first.title}.`;
+  return second ? `Highest access is ${first.title} and ${second.title}.` : `Highest access is ${first.title}.`;
 }
 
 interface Scored {
@@ -278,8 +278,8 @@ export function assess(m: Manifest): Assessment {
     const sensitive = isSensitive(p);
     items.push({
       code: "optional", group: "optional",
-      title: sensitive ? `Can request later: Sensitive site access (${p})` : `Can request later: ${p}`,
-      detail: sensitive ? "Requestable at runtime for a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." : "Requestable at runtime; not granted on install.",
+      title: sensitive ? `Can request later, sensitive site access (${p})` : `Can request later, ${p}`,
+      detail: sensitive ? "Requestable at runtime for a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." : "Requestable at runtime but not granted on install.",
       points: 0,
     });
   }
