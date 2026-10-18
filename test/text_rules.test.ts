@@ -6,6 +6,7 @@ import type { Manifest } from "../src/types";
 
 const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+const privacy = readFileSync(new URL("../web/privacy.html", import.meta.url), "utf8");
 
 // A scheme URL such as https://... or a match pattern such as *://*/* counts as a URL or a code sample.
 const URL_RE = /(?:\*|[a-z][a-z0-9+.-]*):\/\/[^\s"'<>()]*/gi;
@@ -51,10 +52,14 @@ function assertNoDashes(text: string, where: string): void {
   }
 }
 
-function visibleHtml(): string {
-  const text = html.replace(/<[^>]*>/g, " ");
-  const attrs = [...html.matchAll(ATTR_RE)].map((m) => m[1] ?? "").join("\n");
+function visibleFrom(markup: string): string {
+  const text = markup.replace(/<[^>]*>/g, " ");
+  const attrs = [...markup.matchAll(ATTR_RE)].map((m) => m[1] ?? "").join("\n");
   return decodeEntities(text + "\n" + attrs);
+}
+
+function visibleHtml(): string {
+  return visibleFrom(html);
 }
 
 function visibleAppStrings(): string {
@@ -105,6 +110,12 @@ test("web/app.js visible string literals have no colons outside URLs or times an
   const text = visibleAppStrings();
   assertNoColons(text, "web/app.js");
   assertNoDashes(text, "web/app.js");
+});
+
+test("the privacy page visible text has no colons outside URLs or times and no en or em dashes", () => {
+  const text = visibleFrom(privacy);
+  assertNoColons(text, "web/privacy.html");
+  assertNoDashes(text, "web/privacy.html");
 });
 
 test("the rule titles and details served at /api/rules are free of stray colons and em dashes", () => {

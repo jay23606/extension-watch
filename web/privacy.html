@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="What Extension Watch stores, how long it keeps it, and how to delete a list." />
+  <meta name="theme-color" content="#0a0d14" />
+  <title>Privacy and terms. Extension Watch</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Extension Watch</a>
+    <nav class="nav" aria-label="Primary">
+      <a class="nav__link" href="/">Product</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section class="view">
+      <div class="page-head">
+        <h1 class="page-title">Privacy and terms</h1>
+        <p class="page-sub">This page describes exactly what Extension Watch stores and for how long. Every line comes from the code that runs the service.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">What we store</h2>
+        <p class="page-note">Extension Watch keeps one record for each watchlist in Workers KV, the key value store that Cloudflare provides. The record holds the watchlist name you choose, the extension IDs on the list, one snapshot for each extension (the manifest the browser would run, the access grade and the time it was checked), the change log, the masked webhook host, and a short audit log of admin actions. There is no account and no email.</p>
+        <p class="page-note">The saved webhook URL is stored so alerts can be sent, and it is shown back as its host name only. Alerts contain the watchlist name and public extension data. Extension packages are read from Google and are never stored. Rules check host names with the ICANN public suffix list, which is compiled into the service instead of being fetched at run time.</p>
+        <p class="page-note">The audit log records admin actions on a list, such as created, webhook set or removed, test alert sent, policy exported, rotate and rename, with the time and the action only. Tokens and webhook URLs are never written to it. It keeps the newest 100 entries, and the change log keeps the newest 200 entries.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">How long we keep it</h2>
+        <p class="page-note">A watchlist record expires 90 days after the last save. A list that nobody opens for 90 days stops being checked, so it is not saved again and then expires. A list with a webhook stays checked for up to 365 days of silence, because that team reads the alerts. The read-only link that points to a list is kept for 400 days. A snapshot of an individual extension is shared between every list that watches it and expires after 3 days. Daily counters for scans, new watchlists and test alerts expire after 2 days.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">What we do not do</h2>
+        <p class="page-note">The service sets no cookies and runs no analytics. Pages load no tracking pixel and no third party script. The service does not sell data and does not send your data anywhere except the webhook you set yourself.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">Subprocessors</h2>
+        <p class="page-note">The service runs on Cloudflare, which hosts the Worker and stores the records in Workers KV. It reads extension data from Google, from the public Chrome extension update service and from the Chrome Web Store pages. Those are the only subprocessors.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">How to delete a list</h2>
+        <p class="page-note">Open the admin link for the list and press the delete button. That sends <code>DELETE /api/watchlists/&lt;admin token&gt;</code>. Deleting a list removes the record and its read-only link at once, so both links stop working. Deletion is final, with no soft delete and no backup copy.</p>
+      </div>
+
+      <div class="card">
+        <h2 class="section-title">Contact</h2>
+        <p class="page-note">Michael Lip, github.com/theluckystrike. The profile is at <a href="https://github.com/theluckystrike">https://github.com/theluckystrike</a>.</p>
+      </div>
+
+      <p class="back"><a href="/">Back to the app</a></p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    Extension Watch by Michael Lip, github.com/theluckystrike. Not affiliated with Google. <a href="/privacy">Privacy and terms</a>
+  </footer>
+</body>
+</html>

@@ -339,6 +339,33 @@ function buildChangeList(changes) {
   return wrap;
 }
 
+const AUDIT_LABEL = {
+  created: "List created",
+  "webhook set": "Webhook set",
+  "webhook removed": "Webhook removed",
+  "test alert sent": "Test alert sent",
+  "policy exported": "Policy exported",
+  rotate: "Links rotated",
+  renamed: "Renamed",
+};
+
+function buildAuditList(entries) {
+  const wrap = el("div", "changelog");
+  if (!entries || !entries.length) {
+    wrap.appendChild(el("p", "drawer__empty", "No admin actions yet."));
+    return wrap;
+  }
+  const list = el("ul", "change-list");
+  for (const entry of entries.slice().reverse()) {
+    const li = el("li", "change");
+    li.appendChild(el("span", "change__kind", AUDIT_LABEL[entry.action] || entry.action));
+    if (entry.at) li.appendChild(el("span", "change__at", new Date(entry.at).toLocaleString()));
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
 function buildWatchExtensions(extensions) {
   const wrap = el("div", "watch-ext");
   if (!extensions || !extensions.length) {
@@ -400,6 +427,8 @@ function wireExports(token, admin, data) {
   const base = "/api/watchlists/" + encodeURIComponent(token);
   $("#exportCsv").href = base + "/export.csv";
   $("#exportChanges").href = base + "/changes.csv";
+  $("#exportAudit").href = base + "/audit.csv";
+  $("#exportAudit").hidden = !admin;
   $("#policyTools").hidden = !admin;
   $("#policyNote").hidden = !admin;
   $("#policyModes").hidden = !admin;
@@ -432,8 +461,10 @@ function renderWatchlist(data, token) {
   wireExports(token, admin, data);
   if (admin) wireAlerts(token, data && data.webhookSet ? data.webhook : null);
   let del = document.getElementById("watchDelete");
+  let rot = document.getElementById("watchRotate");
   if (!admin) {
     if (del) del.remove();
+    if (rot) rot.remove();
   } else {
     if (!del) {
       del = el("button", "btn btn--ghost", "Delete this watchlist");
@@ -442,6 +473,13 @@ function renderWatchlist(data, token) {
       link.parentNode.appendChild(del);
     }
     del.onclick = () => deleteWatchlist(token, del);
+    if (!rot) {
+      rot = el("button", "btn btn--ghost", "Rotate links");
+      rot.id = "watchRotate";
+      rot.type = "button";
+      link.parentNode.appendChild(rot);
+    }
+    wireRotate(token, rot);
   }
   const changes = $("#watchChanges");
   const names = {};
@@ -454,6 +492,9 @@ function renderWatchlist(data, token) {
   const ids = (data && data.ids) || Object.keys(snaps);
   const list = ids.map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
+  const auditSection = $("#auditSection");
+  auditSection.hidden = !admin;
+  if (admin) $("#watchAudit").replaceChildren(buildAuditList((data && data.audit) || []));
   let warning = "";
   try {
     warning = window.sessionStorage.getItem("ew-watch-warning") || "";
@@ -464,6 +505,22 @@ function renderWatchlist(data, token) {
   const missing = ids.filter((id) => snaps[id] && snaps[id].error === "Not on the Chrome Web Store").length;
   if (!warning && ids.length > 0 && missing * 2 > ids.length) warning = "Most IDs in this list are not on the Chrome Web Store. Check them and try again.";
   showWatchWarning(warning);
+}
+
+function wireRotate(token, button) {
+  button.onclick = async () => {
+    if (!window.confirm("Rotate both links? The old admin and read-only links will stop working at once.")) return;
+    button.disabled = true;
+    try {
+      const data = await apiJson("/api/watchlists/" + encodeURIComponent(token) + "/rotate", { method: "POST" });
+      const origin = window.location.origin;
+      window.alert("New admin link " + origin + data.url + "\nNew read-only link " + origin + data.viewUrl + "\nSave them now. The old links no longer work.");
+      window.location.assign(data.url);
+    } catch (err) {
+      button.disabled = false;
+      $("#watchMeta").textContent = err.message || "Could not rotate the links.";
+    }
+  };
 }
 
 async function deleteWatchlist(token, button) {

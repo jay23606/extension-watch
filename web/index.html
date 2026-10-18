@@ -147,6 +147,7 @@
         <p id="watchExports" class="watch-actions">
           <a id="exportCsv" class="btn btn--ghost btn--small" href="#" download>Download inventory CSV</a>
           <a id="exportChanges" class="btn btn--ghost btn--small" href="#" download>Download change log CSV</a>
+          <a id="exportAudit" class="btn btn--ghost btn--small" href="#" download hidden>Download audit CSV</a>
           <span id="policyTools" hidden>
             <label for="policyMode">Policy mode</label>
             <select id="policyMode" class="policy-threshold">
@@ -178,6 +179,11 @@
         <div id="watchExtensions" class="card"></div>
       </section>
 
+      <section id="auditSection" aria-labelledby="audit-heading" hidden>
+        <h2 class="section-title" id="audit-heading">Audit log</h2>
+        <div id="watchAudit" class="card"></div>
+      </section>
+
       <section id="alertSection" aria-labelledby="alert-heading" hidden>
         <h2 class="section-title" id="alert-heading">Alerts</h2>
         <form id="alertForm" class="card alert-form">
@@ -196,7 +202,7 @@
   </main>
 
   <footer class="footer">
-    Extension Watch by Michael Lip, github.com/theluckystrike. Not affiliated with Google.
+    Extension Watch by Michael Lip, github.com/theluckystrike. Not affiliated with Google. <a href="/privacy">Privacy and terms</a>
   </footer>
 
   <script src="/app.js"></script>

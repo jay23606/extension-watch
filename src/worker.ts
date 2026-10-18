@@ -1,8 +1,8 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, remove, resolveView, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
-import { changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
+import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, logAudit, MAX_IDS, newToken, remove, resolveView, rotate, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
@@ -157,6 +157,10 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
   if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
   if (file === "export.csv") return csvResponse(inventoryCsv(wl), "watchlist-inventory.csv");
   if (file === "changes.csv") return csvResponse(changesCsv(wl), "watchlist-changes.csv");
+  if (file === "audit.csv") {
+    if (!direct) return Response.json({ error: "Only the admin link can export the audit log." }, { status: 403 });
+    return csvResponse(auditCsv(wl), "watchlist-audit.csv");
+  }
   if (file === "policy.json") {
     if (!direct) return Response.json({ error: "Only the admin link can export a policy." }, { status: 403 });
     const query = new URL(req.url).searchParams;
@@ -164,6 +168,8 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
     if (!threshold) throw new FetchError(400, "Use a grade threshold from A to F.");
     const mode = modeFrom(query.get("mode"));
     if (!mode) throw new FetchError(400, "Use a policy mode of threshold or default-deny.");
+    logAudit(wl, "policy exported");
+    await save(env.WATCHLISTS, adminToken, wl);
     return new Response(JSON.stringify(policyFor(wl, threshold, mode), null, 2), {
       headers: { "content-type": "application/json", "content-disposition": 'attachment; filename="chrome-extension-policy.json"' },
     });
@@ -180,15 +186,24 @@ const routes: Record<string, Handler> = {
     const get = snapshotter(env.WATCHLISTS, new Map(), { left: MAX_SCAN, kv: 4 * MAX_SCAN });
     return Response.json({ results: await scanMany(ids, get), invalid, dropped });
   },
-  "POST /api/watchlists": async (req, env) => {
+  "POST /api/watchlists": async (req, env, rest) => {
+    // Admin only: issue fresh links and retire the old pair. The old tokens 404 as soon as this returns.
+    if (rest.endsWith("/rotate")) {
+      const token = rest.slice(0, -"/rotate".length);
+      const result = await rotate(env.WATCHLISTS, token);
+      if (!result) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+      return Response.json({ token: result.token, viewToken: result.viewToken, url: `/w/${result.token}`, viewUrl: `/w/${result.viewToken}` });
+    }
+    if (rest) return Response.json({ error: "Not found." }, { status: 404 });
     if (!(await allow(env.WATCHLISTS, ipOf(req), "watch", 20, today()))) throw new FetchError(429, "Daily watchlist limit reached for this address.");
     const body = await json<{ name?: unknown; ids?: unknown }>(req);
     const { ids, dropped } = parseIds(body.ids, MAX_IDS);
     if (ids.length === 0) throw new FetchError(400, "Add at least one extension.");
     const token = newToken(); const now = new Date().toISOString();
-    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now };
+    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], audit: [], createdAt: now, lastCheck: now };
     apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS, kv: 4 * MAX_IDS })), true); // baseline: no "new" noise
     await ensureViewToken(env.WATCHLISTS, token, wl);
+    logAudit(wl, "created");
     await save(env.WATCHLISTS, token, wl);
     return Response.json({ token, url: `/w/${token}`, dropped });
   },
@@ -206,7 +221,10 @@ const routes: Record<string, Handler> = {
     const viewToken = role === "admin" ? await ensureViewToken(env.WATCHLISTS, token, wl) : wl.viewToken;
     if ((wl.viewedAt ?? "").slice(0, 10) !== today() || !hadView) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, token, wl); }
     const { webhook, viewToken: _v, ...shown } = wl;
-    if (role === "viewer") return Response.json({ ...shown, role, webhook: null, webhookSet: Boolean(webhook) });
+    if (role === "viewer") {
+      const { audit: _a, ...viewerShown } = shown;
+      return Response.json({ ...viewerShown, role, webhook: null, webhookSet: Boolean(webhook) });
+    }
     return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook) });
   },
   "DELETE /api/watchlists": async (_req, env, rest) =>
@@ -214,12 +232,21 @@ const routes: Record<string, Handler> = {
   "PUT /api/watchlists": async (req, env, rest) => {
     const wl = await load(env.WATCHLISTS, rest);
     if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
-    const raw = String((await json<{ webhook?: unknown }>(req)).webhook ?? "").trim();
-    const problem = raw ? webhookProblem(raw) : null;
-    if (problem) throw new FetchError(400, problem);
-    wl.webhook = raw || null;
+    const body = await json<{ webhook?: unknown; name?: unknown }>(req);
+    if (body.webhook !== undefined) {
+      const raw = String(body.webhook ?? "").trim();
+      const problem = raw ? webhookProblem(raw) : null;
+      if (problem) throw new FetchError(400, problem);
+      const next = raw || null;
+      if (next !== (wl.webhook ?? null)) logAudit(wl, next ? "webhook set" : "webhook removed");
+      wl.webhook = next;
+    }
+    if (body.name !== undefined) {
+      const name = String(body.name ?? "").trim().slice(0, 60);
+      if (name && name !== wl.name) { wl.name = name; logAudit(wl, "renamed"); }
+    }
     await save(env.WATCHLISTS, rest, wl);
-    return Response.json({ webhook: Boolean(wl.webhook) });
+    return Response.json({ webhook: Boolean(wl.webhook), name: wl.name });
   },
   "POST /api/test-alert": async (req, env) => {
     const token = String((await json<{ token?: unknown }>(req)).token ?? "");
@@ -232,6 +259,7 @@ const routes: Record<string, Handler> = {
     const viewToken = await ensureViewToken(env.WATCHLISTS, token, wl);
     await save(env.WATCHLISTS, token, wl);
     const res = await sendAlert(wl, sample, `${new URL(req.url).origin}/w/${viewToken}`);
+    if (res.ok) { logAudit(wl, "test alert sent"); await save(env.WATCHLISTS, token, wl); }
     return Response.json({ sent: res.ok, status: res.status });
   },
   "GET /api/rules": async () => Response.json({ rules: RULES }),
@@ -274,6 +302,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return Response.json({ error: "Too many requests. Wait a minute and try again." }, { status: 429 });
     }
     if (url.pathname.startsWith("/w/")) return env.ASSETS.fetch(new Request(new URL("/", url), request));
+    // The privacy page is a served static document, not a single-page-app route.
+    if (url.pathname === "/privacy" || url.pathname === "/privacy/") return env.ASSETS.fetch(new Request(new URL("/privacy.html", url), request));
     const parts = url.pathname.split("/");
     const a = parts[2] ?? "";
     const rest = parts.slice(3).join("/");

@@ -49,7 +49,7 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 
 | Key | Value | Expiry |
 |---|---|---|
-| `wl:<admin token>` | `{ name, ids[], snapshots{id: {manifest, assessment, error, checkedAt}}, changes[], createdAt, lastCheck, viewedAt, webhook, viewToken }`, with `{ lastCheck }` as key metadata so the scheduler can pick due lists from a listing alone | 90 days, renewed by every save |
+| `wl:<admin token>` | `{ name, ids[], snapshots{id: {manifest, assessment, error, checkedAt}}, changes[], audit[], createdAt, lastCheck, viewedAt, webhook, viewToken }`, with `{ lastCheck }` as key metadata so the scheduler can pick due lists from a listing alone | 90 days, renewed by every save |
 | `vw:<read-only token>` | The admin token it belongs to | 400 days |
 | `ext:<extension id>` | The day's snapshot of one extension, shared by every watchlist | 3 days |
 | `rl:<action>:<day>:<address>` | Daily counter for scans, new watchlists and test alerts | 2 days |
@@ -64,11 +64,14 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | `POST /api/watchlists` `{ name, ids }` | Create a watchlist (up to 50 extensions) and get back the private token |
 | `GET /api/watchlists/<token>` | Read a watchlist. The admin token returns `role: admin`, the read-only token and the webhook host. The read-only token returns `role: viewer` and no webhook |
 | `PUT /api/watchlists/<admin token>` `{ webhook }` | Set or clear the alert webhook |
+| `PUT /api/watchlists/<admin token>` `{ name }` | Rename a watchlist |
 | `DELETE /api/watchlists/<admin token>` | Delete a watchlist and its read-only link |
+| `POST /api/watchlists/<admin token>/rotate` | Issue a new admin token and a new read-only token, move the list to the new key, delete the old keys and return the new links. Admin link only, and both old links return 404 afterwards |
 | `POST /api/test-alert` `{ token: <admin token> }` | Send a labelled test message to the saved webhook |
 | `GET /api/rules` | The full points table |
 | `GET /api/watchlists/<token>/export.csv` | Inventory as CSV, for the admin and read-only links |
 | `GET /api/watchlists/<token>/changes.csv` | Change log as CSV, for the admin and read-only links |
+| `GET /api/watchlists/<admin token>/audit.csv` | Admin action log as CSV, admin link only |
 | `GET /api/watchlists/<admin token>/policy.json?threshold=D&mode=threshold` | Chrome ExtensionSettings policy, admin link only. Mode is threshold (default) or default-deny |
 
 ## Methodology
@@ -103,6 +106,14 @@ The first production check ran on 18 October 2026 with the shared cache cleared 
 - The API accepts only `application/json` (the MIME type is parsed, not substring-matched), so neither a form nor a simple cross-site request from another page can start work in a visitor's browser.
 - Pages are served with a strict Content Security Policy (no inline script, no eval), `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`. Text from manifests is rendered with `textContent`, never as HTML.
 
+## Governance
+
+The privacy and terms page lives at /privacy and is linked in the footer. It states exactly what the code stores and for how long, which is the watchlist name, the extension ids, the snapshots and the change log in Workers KV, the saved webhook shown as its host only, the 90-day expiry of a list record, no cookies and no analytics, the subprocessors Cloudflare for hosting and storage and Google for the public update service and the Web Store pages, and how to delete a list with the admin delete button or the DELETE route. The contact line is Michael Lip, github.com/theluckystrike.
+
+The admin page has a Rotate links button with a confirm step. It calls `POST /api/watchlists/<admin token>/rotate`, which issues a new admin token and a new read-only token, moves the list to the new key and deletes the old keys. Both old links return 404 within about a minute, the time Workers KV takes to drop cached reads. Use it after an admin link is shared by mistake.
+
+Each list keeps an append-only audit log of admin actions, which are created, webhook set or removed, test alert sent, policy export, rotate and rename. Each entry holds the time and the action only, never a token or a webhook URL, and the log keeps the newest 100 entries. Admins see it on the watchlist page and can download it as `.../audit.csv`, which the read-only link cannot reach.
+
 ## Exports
 
 The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold and a mode. Threshold mode, the default, keeps the catch-all installable and blocks only the listed extensions graded at or below the threshold. Default deny mode blocks every extension that is not on the list. Both modes put the debugger block and the sensitive host block on the catch-all entry, so extensions that are not on the list are also kept off the debugger permission and off sensitive sites. In the Google Admin console, open Chrome browser, then Custom Configurations under Chrome Enterprise Core, and paste the JSON. The same JSON can be deployed through the Chrome Group Policy templates on Windows, added to the com.google.Chrome configuration profile plist on macOS, or written to a file under /etc/opt/chrome/policies/managed/ on Linux. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry. A password manager or sign-on tool, found by its extension id, keeps its own vendor domains out of runtime_blocked_hosts and gets the sign-in domains it needs as runtime_allowed_hosts. A blocked extension needs only the blocked install mode. CSV and policy export are free during the hackathon, and billing is not connected in this version.
@@ -124,9 +135,10 @@ The cost to serve a watchlist is at most one streamed download per extension per
 | Scan and grade up to 25 extensions | Billing and paid plans |
 | Shared daily cache, one download per extension a day | Email alerts |
 | A scheduler runs every 10 minutes and each watchlist is re-checked about once a day, with a change log | Single sign-on |
-| Slack, Discord and Google Chat webhook alerts | Audit log |
+| Slack, Discord and Google Chat webhook alerts | |
 | Read-only link and admin link for every watchlist | Unlimited extensions |
-| CSV inventory and change log export | |
+| CSV inventory, change log and audit log export | |
+| Rotate links and a privacy and terms page | |
 | Chrome ExtensionSettings policy export in two modes | |
 
 ## Run it
@@ -135,7 +147,7 @@ The cost to serve a watchlist is at most one streamed download per extension per
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npm test                                      # 192 tests, no network
+npm test                                      # 207 tests, no network
 npm run check                                 # TypeScript with no errors
 ```
 

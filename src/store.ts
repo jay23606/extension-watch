@@ -5,7 +5,9 @@ import type { Assessment, Change, Manifest } from "./types.js";
 /** `transient` marks failures worth retrying (Google 5xx, timeouts); a definitive answer (not listed, 404, unreadable) counts as a check. */
 export interface Snapshot { id: string; manifest: Manifest | null; assessment: Assessment | null; error: string | null; checkedAt: string; transient?: boolean }
 export type LoggedChange = Omit<Change, "kind"> & { kind: string; id: string; at: string };
-export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string; viewToken?: string }
+/** One admin action with its time only, never a token or a webhook URL. */
+export interface AuditEntry { at: string; action: string }
+export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; audit?: AuditEntry[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string; viewToken?: string }
 export interface Kv {
   get(k: string): Promise<string | null>;
   put(k: string, v: string, o?: { expirationTtl?: number; metadata?: unknown }): Promise<void>;
@@ -15,6 +17,7 @@ export interface Kv {
 
 export const MAX_IDS = 50;
 export const MAX_CHANGES = 200;
+export const MAX_AUDIT = 100;
 export const IDLE_TTL = 90 * 86400; // every save renews it; the scheduler stops saving lists nobody opened for 90 days, so they expire
 const CACHE_TTL = 3 * 86400;
 
@@ -33,7 +36,32 @@ export async function load(kv: Kv, token: string): Promise<Watchlist | null> {
 
 export async function save(kv: Kv, token: string, wl: Watchlist): Promise<void> {
   wl.changes = wl.changes.slice(-MAX_CHANGES);
+  wl.audit = (wl.audit ?? []).slice(-MAX_AUDIT);
   await kv.put(`wl:${token}`, JSON.stringify(wl), { expirationTtl: IDLE_TTL, metadata: { lastCheck: wl.lastCheck } });
+}
+
+/** Append one admin action to a list, capped at the newest MAX_AUDIT entries. Tokens and webhook URLs are never written here. */
+export function logAudit(wl: Watchlist, action: string): void {
+  wl.audit = [...(wl.audit ?? []), { at: new Date().toISOString(), action }].slice(-MAX_AUDIT);
+}
+
+/**
+ * Move a list to a fresh admin token and a fresh read-only token, then delete the old keys. The
+ * caller must already hold the admin token. Returns the new pair, or null when the list is gone.
+ */
+export async function rotate(kv: Kv, token: string): Promise<{ token: string; viewToken: string } | null> {
+  const wl = await load(kv, token);
+  if (!wl) return null;
+  const oldView = wl.viewToken;
+  const newAdmin = newToken();
+  const newView = newToken();
+  wl.viewToken = newView;
+  logAudit(wl, "rotate");
+  await save(kv, newAdmin, wl);
+  await kv.put(`vw:${newView}`, newAdmin, { expirationTtl: 400 * 86400 });
+  await kv.delete(`wl:${token}`);
+  if (oldView) await kv.delete(`vw:${oldView}`);
+  return { token: newAdmin, viewToken: newView };
 }
 
 export async function remove(kv: Kv, token: string): Promise<boolean> {

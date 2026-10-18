@@ -50,6 +50,13 @@ export function changesCsv(wl: Watchlist): string {
   return csv(rows);
 }
 
+/** The admin action log, one row per action with its time and label only. */
+export function auditCsv(wl: Watchlist): string {
+  const rows: unknown[][] = [["at", "action"]];
+  for (const entry of wl.audit ?? []) rows.push([entry.at, entry.action]);
+  return csv(rows);
+}
+
 const BLOCKED_PERMISSIONS: readonly string[] = ["debugger"];
 
 export type PolicyMode = "threshold" | "default-deny";

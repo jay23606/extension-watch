@@ -71,3 +71,22 @@ test("the deployment note names the console, Group Policy, plist and Linux route
   assert.match(html, /\/etc\/opt\/chrome\/policies\/managed\//);
   assert.doesNotMatch(html, /Additional Google services/);
 });
+
+test("the admin page offers rotate links with a confirm step", () => {
+  assert.match(app, /Rotate links/);
+  assert.match(app, /wireRotate/);
+  assert.match(app, /\/rotate/);
+  assert.match(app, /window\.confirm\("Rotate both links/);
+});
+
+test("the admin page shows the audit log and offers an audit CSV", () => {
+  assert.match(html, /id="auditSection"/);
+  assert.match(html, /id="watchAudit"/);
+  assert.match(html, /id="exportAudit"/);
+  assert.match(app, /audit\.csv/);
+  assert.match(app, /buildAuditList/);
+});
+
+test("the footer links to the privacy page", () => {
+  assert.match(html, /href="\/privacy"/);
+});
