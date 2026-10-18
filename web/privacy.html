@@ -25,9 +25,9 @@
 
       <div class="card">
         <h2 class="section-title">What we store</h2>
-        <p class="page-note">Extension Watch keeps one record for each watchlist in Workers KV, the key value store that Cloudflare provides. The record holds the watchlist name you choose, the extension IDs on the list, one snapshot for each extension (the manifest the browser would run, the access grade and the time it was checked), the change log, the masked webhook host, and a short audit log of admin actions. There is no account and no email.</p>
-        <p class="page-note">The saved webhook URL is stored so alerts can be sent, and it is shown back as its host name only. Alerts contain the watchlist name and public extension data. Extension packages are read from Google and are never stored. Rules check host names with the ICANN public suffix list, which is compiled into the service instead of being fetched at run time.</p>
-        <p class="page-note">The audit log records admin actions on a list, such as created, webhook set or removed, test alert sent, policy exported, rotate and rename, with the time and the action only. Tokens and webhook URLs are never written to it. It keeps the newest 100 entries, and the change log keeps the newest 200 entries.</p>
+        <p class="page-note">Extension Watch keeps one record for each watchlist in Workers KV, the key value store that Cloudflare provides. The record holds the watchlist name you choose, the extension IDs on the list, one snapshot for each extension (the manifest the browser would run, the access grade and the time it was checked), the change log, the full webhook URL, and a short audit log of admin actions. There is no account and no email.</p>
+        <p class="page-note">The full webhook URL is stored so alerts can be sent. The pages and API responses show it masked, as its host name only, so the secret path in the URL never appears on screen or in a shared view. Alerts contain the watchlist name and public extension data. Extension packages are read from Google and are never stored. Rules check host names with the ICANN public suffix list, which is compiled into the service instead of being fetched at run time.</p>
+        <p class="page-note">The audit log records admin actions on a list, such as created, webhook set or removed, test alert sent, policy exported, a CSV download, rotate, rename and delete, with the time and the action only. Each entry is stored under its own key, so two admins acting at the same time both keep their entry. Tokens and webhook URLs are never written to it. It keeps the newest 100 entries, and the change log keeps the newest 200 entries.</p>
       </div>
 
       <div class="card">
@@ -47,7 +47,8 @@
 
       <div class="card">
         <h2 class="section-title">How to delete a list</h2>
-        <p class="page-note">Open the admin link for the list and press the delete button. That sends <code>DELETE /api/watchlists/&lt;admin token&gt;</code>. Deleting a list removes the record and its read-only link at once, so both links stop working. Deletion is final, with no soft delete and no backup copy.</p>
+        <p class="page-note">Open the admin link for the list and press the delete button. That sends <code>DELETE /api/watchlists/&lt;admin token&gt;</code>. Deleting a list removes the record, its read-only link and its audit keys, so both links stop working within about a minute, the time Workers KV takes to drop cached reads. Deletion is final, with no soft delete and no backup copy.</p>
+        <p class="page-note">Rotating the links issues a new admin link and a new read-only link, moves the list and its audit keys to the new admin link and retires the old pair. The old links stop working within about a minute, the time Workers KV takes to drop cached reads.</p>
       </div>
 
       <div class="card">

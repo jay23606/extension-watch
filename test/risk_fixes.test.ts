@@ -158,6 +158,19 @@ test("a sensitive host and a sensitive content script still count once at 15", (
   assert.equal(a.grade, "A");
 });
 
+test("a host permission and a content script on the same sensitive site count once", () => {
+  const a = assess(manifest({ hostPermissions: ["https://mail.google.com/*"], contentScriptMatches: ["https://mail.google.com/*"] }));
+  assert.equal(a.score, 15);
+  assert.equal(a.grade, "A");
+  assert.equal(a.findings.filter((f) => f.code === "sensitive_hosts").length, 1);
+});
+
+test("a host permission that covers the content script sensitive site counts once", () => {
+  const a = assess(manifest({ hostPermissions: ["*://*.google.com/*"], contentScriptMatches: ["https://mail.google.com/*"] }));
+  assert.equal(a.score, 15);
+  assert.equal(a.findings.filter((f) => f.code === "sensitive_hosts").length, 1);
+});
+
 test("an optional permission on a sensitive site is labelled and worth 0 points", () => {
   const a = assess(manifest({ optionalPermissions: ["https://acme.sharepoint.com/*"] }));
   assert.equal(a.score, 0);

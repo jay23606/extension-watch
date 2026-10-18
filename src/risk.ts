@@ -147,6 +147,17 @@ function hasListedSubdomain(host: string): boolean {
   return SENSITIVE_DOMAINS.some((other) => other !== host && other.endsWith(`.${host}`));
 }
 
+/** True when one host pattern reaches a listed sensitive domain, by the exact host or through a wildcard. */
+function patternReaches(raw: string, d: string): boolean {
+  const wildcard = raw.startsWith("*.");
+  const host = wildcard ? raw.slice(2) : raw;
+  if (!host.includes(".")) return false;
+  if (host === d) return true;
+  if (EXACT_ONLY_HOSTS.has(d)) return false;
+  if (host.endsWith(`.${d}`)) return true;
+  return wildcard && d.endsWith(`.${host}`) && d.split(".").length === host.split(".").length + 1 && !hasListedSubdomain(d);
+}
+
 /**
  * True when a pattern targets a listed sensitive host or one of its subdomains, or when a wildcard covers
  * them. A wildcard counts only for a direct child that is not itself an umbrella, so *.google.com is
@@ -156,15 +167,14 @@ function hasListedSubdomain(host: string): boolean {
 export function isSensitive(pattern: string): boolean {
   const raw = hostOf(pattern);
   if (!raw) return false;
-  const wildcard = raw.startsWith("*.");
-  const host = wildcard ? raw.slice(2) : raw;
-  if (!host.includes(".")) return false;
-  return SENSITIVE_DOMAINS.some((d) => {
-    if (host === d) return true;
-    if (EXACT_ONLY_HOSTS.has(d)) return false;
-    if (host.endsWith(`.${d}`)) return true;
-    return wildcard && d.endsWith(`.${host}`) && d.split(".").length === host.split(".").length + 1 && !hasListedSubdomain(d);
-  });
+  return SENSITIVE_DOMAINS.some((d) => patternReaches(raw, d));
+}
+
+/** The listed sensitive domains a host pattern reaches, so a host permission and a content script on the same site are counted once. */
+export function sensitiveDomainsFor(pattern: string): string[] {
+  const raw = hostOf(pattern);
+  if (!raw) return [];
+  return SENSITIVE_DOMAINS.filter((d) => patternReaches(raw, d));
 }
 
 /** Chrome ignores the path of a host permission, so any scheme with a bare path grants every site. */
@@ -245,8 +255,14 @@ export function assess(m: Manifest): Assessment {
     // label but score 0 there, so the all-sites rule is not double counted.
     items.push(rule("sensitive_hosts", 0));
   } else {
-    if (m.hostPermissions.some(isSensitive)) items.push(rule("sensitive_hosts"));
-    if (m.contentScriptMatches.some(isSensitive)) {
+    const hostDomains = new Set(m.hostPermissions.filter(isSensitive).flatMap(sensitiveDomainsFor));
+    const hostSensitive = hostDomains.size > 0;
+    const scriptSensitive = m.contentScriptMatches.some(isSensitive);
+    // A content script on a site the host permission already reaches is the same access, so add the
+    // content script finding only for a sensitive site the host permissions do not cover.
+    const coveredByHost = m.contentScriptMatches.every((p) => !isSensitive(p) || sensitiveDomainsFor(p).every((d) => hostDomains.has(d)));
+    if (hostSensitive) items.push(rule("sensitive_hosts"));
+    if (scriptSensitive && !coveredByHost) {
       items.push({ ...rule("sensitive_hosts"), title: "Sensitive site access (content script)", detail: "Content scripts reach a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." });
     }
   }

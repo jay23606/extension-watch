@@ -1,7 +1,7 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, logAudit, MAX_IDS, newToken, remove, resolveView, rotate, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, readAudit, remove, resolveView, rotate, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
@@ -45,7 +45,7 @@ function snapshotter(kv: Kv | null, memo: Map<string, Promise<Snapshot>>, budget
       if (budget.kv <= 2) return { id, manifest: null, assessment: null, error: POSTPONED, checkedAt: new Date().toISOString(), transient: true };
       budget.kv -= 1;
       const hit = kv ? await cachedSnapshot(kv, id, today()) : null;
-      // Grades are recomputed from the cached manifest, so a rule change applies at once.
+      // Grades are recomputed from the cached manifest, so a rule change applies right away.
       if (hit) return hit.manifest ? { ...hit, assessment: assess(hit.manifest) } : hit;
       if (budget.left <= 0) return { id, manifest: null, assessment: null, error: POSTPONED, checkedAt: new Date().toISOString(), transient: true };
       budget.left--;
@@ -155,11 +155,18 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
   const adminToken = direct ? token : (await resolveView(env.WATCHLISTS, token)) ?? "";
   const wl = direct ?? (adminToken ? await load(env.WATCHLISTS, adminToken) : null);
   if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
-  if (file === "export.csv") return csvResponse(inventoryCsv(wl), "watchlist-inventory.csv");
-  if (file === "changes.csv") return csvResponse(changesCsv(wl), "watchlist-changes.csv");
+  if (file === "export.csv") {
+    await appendAudit(env.WATCHLISTS, adminToken, "inventory exported");
+    return csvResponse(inventoryCsv(wl), "watchlist-inventory.csv");
+  }
+  if (file === "changes.csv") {
+    await appendAudit(env.WATCHLISTS, adminToken, "change log exported");
+    return csvResponse(changesCsv(wl), "watchlist-changes.csv");
+  }
   if (file === "audit.csv") {
     if (!direct) return Response.json({ error: "Only the admin link can export the audit log." }, { status: 403 });
-    return csvResponse(auditCsv(wl), "watchlist-audit.csv");
+    await appendAudit(env.WATCHLISTS, adminToken, "audit exported");
+    return csvResponse(auditCsv(await readAudit(env.WATCHLISTS, adminToken)), "watchlist-audit.csv");
   }
   if (file === "policy.json") {
     if (!direct) return Response.json({ error: "Only the admin link can export a policy." }, { status: 403 });
@@ -168,8 +175,7 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
     if (!threshold) throw new FetchError(400, "Use a grade threshold from A to F.");
     const mode = modeFrom(query.get("mode"));
     if (!mode) throw new FetchError(400, "Use a policy mode of threshold or default-deny.");
-    logAudit(wl, "policy exported");
-    await save(env.WATCHLISTS, adminToken, wl);
+    await appendAudit(env.WATCHLISTS, adminToken, "policy exported");
     return new Response(JSON.stringify(policyFor(wl, threshold, mode), null, 2), {
       headers: { "content-type": "application/json", "content-disposition": 'attachment; filename="chrome-extension-policy.json"' },
     });
@@ -187,7 +193,7 @@ const routes: Record<string, Handler> = {
     return Response.json({ results: await scanMany(ids, get), invalid, dropped });
   },
   "POST /api/watchlists": async (req, env, rest) => {
-    // Admin only: issue fresh links and retire the old pair. The old tokens 404 as soon as this returns.
+    // Admin only: issue fresh links and retire the old pair. The old tokens 404 within about a minute, once Workers KV drops its cached reads.
     if (rest.endsWith("/rotate")) {
       const token = rest.slice(0, -"/rotate".length);
       const result = await rotate(env.WATCHLISTS, token);
@@ -200,11 +206,11 @@ const routes: Record<string, Handler> = {
     const { ids, dropped } = parseIds(body.ids, MAX_IDS);
     if (ids.length === 0) throw new FetchError(400, "Add at least one extension.");
     const token = newToken(); const now = new Date().toISOString();
-    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], audit: [], createdAt: now, lastCheck: now };
+    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now };
     apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS, kv: 4 * MAX_IDS })), true); // baseline: no "new" noise
     await ensureViewToken(env.WATCHLISTS, token, wl);
-    logAudit(wl, "created");
     await save(env.WATCHLISTS, token, wl);
+    await appendAudit(env.WATCHLISTS, token, "created");
     return Response.json({ token, url: `/w/${token}`, dropped });
   },
   "GET /api/watchlists": async (req, env, rest) => {
@@ -220,15 +226,18 @@ const routes: Record<string, Handler> = {
     const hadView = Boolean(wl.viewToken);
     const viewToken = role === "admin" ? await ensureViewToken(env.WATCHLISTS, token, wl) : wl.viewToken;
     if ((wl.viewedAt ?? "").slice(0, 10) !== today() || !hadView) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, token, wl); }
-    const { webhook, viewToken: _v, ...shown } = wl;
-    if (role === "viewer") {
-      const { audit: _a, ...viewerShown } = shown;
-      return Response.json({ ...viewerShown, role, webhook: null, webhookSet: Boolean(webhook) });
-    }
-    return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook) });
+    const { webhook, viewToken: _v, audit: _storedAudit, ...shown } = wl;
+    if (role === "viewer") return Response.json({ ...shown, role, webhook: null, webhookSet: Boolean(webhook) });
+    const audit = await readAudit(env.WATCHLISTS, token);
+    return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook), audit });
   },
-  "DELETE /api/watchlists": async (_req, env, rest) =>
-    (await remove(env.WATCHLISTS, rest)) ? Response.json({ deleted: true }) : Response.json({ error: "This watchlist does not exist." }, { status: 404 }),
+  "DELETE /api/watchlists": async (_req, env, rest) => {
+    const wl = await load(env.WATCHLISTS, rest);
+    if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+    await appendAudit(env.WATCHLISTS, rest, "deleted");
+    await remove(env.WATCHLISTS, rest);
+    return Response.json({ deleted: true });
+  },
   "PUT /api/watchlists": async (req, env, rest) => {
     const wl = await load(env.WATCHLISTS, rest);
     if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
@@ -238,12 +247,12 @@ const routes: Record<string, Handler> = {
       const problem = raw ? webhookProblem(raw) : null;
       if (problem) throw new FetchError(400, problem);
       const next = raw || null;
-      if (next !== (wl.webhook ?? null)) logAudit(wl, next ? "webhook set" : "webhook removed");
+      if (next !== (wl.webhook ?? null)) await appendAudit(env.WATCHLISTS, rest, next ? "webhook set" : "webhook removed");
       wl.webhook = next;
     }
     if (body.name !== undefined) {
       const name = String(body.name ?? "").trim().slice(0, 60);
-      if (name && name !== wl.name) { wl.name = name; logAudit(wl, "renamed"); }
+      if (name && name !== wl.name) { wl.name = name; await appendAudit(env.WATCHLISTS, rest, "renamed"); }
     }
     await save(env.WATCHLISTS, rest, wl);
     return Response.json({ webhook: Boolean(wl.webhook), name: wl.name });
@@ -259,7 +268,7 @@ const routes: Record<string, Handler> = {
     const viewToken = await ensureViewToken(env.WATCHLISTS, token, wl);
     await save(env.WATCHLISTS, token, wl);
     const res = await sendAlert(wl, sample, `${new URL(req.url).origin}/w/${viewToken}`);
-    if (res.ok) { logAudit(wl, "test alert sent"); await save(env.WATCHLISTS, token, wl); }
+    if (res.ok) await appendAudit(env.WATCHLISTS, token, "test alert sent");
     return Response.json({ sent: res.ok, status: res.status });
   },
   "GET /api/rules": async () => Response.json({ rules: RULES }),

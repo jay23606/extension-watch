@@ -345,6 +345,10 @@ const AUDIT_LABEL = {
   "webhook removed": "Webhook removed",
   "test alert sent": "Test alert sent",
   "policy exported": "Policy exported",
+  "inventory exported": "Inventory CSV downloaded",
+  "change log exported": "Change log CSV downloaded",
+  "audit exported": "Audit CSV downloaded",
+  deleted: "List deleted",
   rotate: "Links rotated",
   renamed: "Renamed",
 };
@@ -509,12 +513,12 @@ function renderWatchlist(data, token) {
 
 function wireRotate(token, button) {
   button.onclick = async () => {
-    if (!window.confirm("Rotate both links? The old admin and read-only links will stop working at once.")) return;
+    if (!window.confirm("Rotate both links? The old admin and read-only links stop working within about a minute, the time Workers KV takes to drop cached reads.")) return;
     button.disabled = true;
     try {
       const data = await apiJson("/api/watchlists/" + encodeURIComponent(token) + "/rotate", { method: "POST" });
       const origin = window.location.origin;
-      window.alert("New admin link " + origin + data.url + "\nNew read-only link " + origin + data.viewUrl + "\nSave them now. The old links no longer work.");
+      window.alert("New admin link " + origin + data.url + "\nNew read-only link " + origin + data.viewUrl + "\nSave them now. The old links stop working within about a minute.");
       window.location.assign(data.url);
     } catch (err) {
       button.disabled = false;
@@ -528,7 +532,7 @@ async function deleteWatchlist(token, button) {
   try {
     const res = await fetch("/api/watchlists/" + encodeURIComponent(token), { method: "DELETE" });
     if (!res.ok) throw new Error("status " + res.status);
-    $("#watchMeta").textContent = "Deleted. Both links no longer work.";
+    $("#watchMeta").textContent = "Deleted. Both links stop working within about a minute.";
     $("#watchExtensions").replaceChildren();
     $("#watchChanges").replaceChildren();
     $("#alertSection").hidden = true;

@@ -1,6 +1,6 @@
 import { SENSITIVE_DOMAINS } from "./risk.js";
 import type { Assessment } from "./types.js";
-import type { Watchlist } from "./store.js";
+import type { AuditEntry, Watchlist } from "./store.js";
 
 // Plain exports for a watchlist. CSV follows RFC 4180 quoting, and the policy is the Chrome
 // ExtensionSettings shape used in the Google Admin console (Chrome browser > Custom Configurations
@@ -51,9 +51,9 @@ export function changesCsv(wl: Watchlist): string {
 }
 
 /** The admin action log, one row per action with its time and label only. */
-export function auditCsv(wl: Watchlist): string {
+export function auditCsv(entries: AuditEntry[]): string {
   const rows: unknown[][] = [["at", "action"]];
-  for (const entry of wl.audit ?? []) rows.push([entry.at, entry.action]);
+  for (const entry of entries) rows.push([entry.at, entry.action]);
   return csv(rows);
 }
 
@@ -82,6 +82,13 @@ const RUNTIME_TOOLS: readonly { ids: readonly string[]; vendor: readonly string[
 ];
 
 /**
+ * Sign-in hosts that every allowed password manager or single sign-on tool must reach, because it
+ * fills or brokers credentials there. They are removed from that tool's runtime_blocked_hosts and
+ * added to its runtime_allowed_hosts.
+ */
+const SIGN_IN_HOSTS: readonly string[] = ["accounts.google.com", "login.microsoftonline.com", "okta.com"];
+
+/**
  * One Chrome host pattern per sensitive domain family. A wildcard covers the host and its
  * subdomains, so a family listed under another one is dropped, and runtime_blocked_hosts takes no
  * path and no port.
@@ -103,18 +110,22 @@ function toolFor(id: string | null | undefined): { vendor: readonly string[]; si
 /**
  * An allowed extension repeats the permission and host blocks from the catch-all entry, because Chrome
  * does not inherit them. A password manager or sign-on tool, found by its extension id, keeps its own
- * vendor domains, and gets the sign-in domains it needs as runtime_allowed_hosts, which the
- * ExtensionSettings format accepts.
+ * vendor domains and the shared sign-in hosts, and gets those domains as runtime_allowed_hosts, which
+ * the ExtensionSettings format accepts.
  */
 function allowedEntry(id: string): Record<string, unknown> {
   const tool = toolFor(id);
-  const blocked = runtimeBlockedHosts().filter((pattern) => !(tool?.vendor ?? []).some((domain) => pattern === `*://*.${domain}`));
+  const unblocked = tool ? [...tool.vendor, ...SIGN_IN_HOSTS] : [];
+  const blocked = runtimeBlockedHosts().filter((pattern) => !unblocked.some((domain) => pattern === `*://*.${domain}`));
   const entry: Record<string, unknown> = {
     installation_mode: "allowed",
     blocked_permissions: [...BLOCKED_PERMISSIONS],
     runtime_blocked_hosts: blocked,
   };
-  if (tool && tool.signIn.length) entry.runtime_allowed_hosts = tool.signIn.map((domain) => `*://*.${domain}`);
+  if (tool) {
+    const allowed = [...new Set([...SIGN_IN_HOSTS, ...tool.signIn])];
+    if (allowed.length) entry.runtime_allowed_hosts = allowed.map((domain) => `*://*.${domain}`);
+  }
   return entry;
 }
 

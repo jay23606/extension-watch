@@ -267,13 +267,38 @@ test("an allowed password manager keeps its vendor domain and gets its sign-in h
   assert.equal(bw.installation_mode, "allowed");
   assert.ok(!bw.runtime_blocked_hosts!.includes("*://*.bitwarden.com"));
   assert.deepEqual(bw.runtime_blocked_hosts!.filter((h) => h.includes("bitwarden")), []);
-  assert.deepEqual(bw.runtime_allowed_hosts, ["*://*.vault.bitwarden.com"]);
+  assert.deepEqual(bw.runtime_allowed_hosts, ["*://*.accounts.google.com", "*://*.login.microsoftonline.com", "*://*.okta.com", "*://*.vault.bitwarden.com"]);
   const op = policy.ExtensionSettings[onepassword.id] as PolicyEntry;
   assert.equal(op.installation_mode, "allowed");
   assert.deepEqual(op.runtime_blocked_hosts!.filter((h) => h.includes("1password")), []);
-  assert.deepEqual(op.runtime_allowed_hosts, ["*://*.my.1password.com", "*://*.start.1password.com"]);
+  assert.deepEqual(op.runtime_allowed_hosts, ["*://*.accounts.google.com", "*://*.login.microsoftonline.com", "*://*.okta.com", "*://*.my.1password.com", "*://*.start.1password.com"]);
+  // The shared sign-in hosts are reachable, so they are no longer blocked for this tool.
+  for (const host of ["*://*.accounts.google.com", "*://*.login.microsoftonline.com", "*://*.okta.com"]) {
+    assert.ok(!bw.runtime_blocked_hosts!.includes(host), host);
+  }
   // The rest of the sensitive hosts still stand.
-  assert.ok(bw.runtime_blocked_hosts!.includes("*://*.okta.com"));
+  assert.ok(bw.runtime_blocked_hosts!.includes("*://*.salesforce.com"));
+});
+
+test("an allowed sign-on tool reaches the shared sign-in hosts in both modes", () => {
+  const okta = snapshot(manifest("glnpjglilkicbckjpbgcfkogebgllemb", { name: "Okta" }));
+  const wl: Watchlist = {
+    name: "Team",
+    ids: [okta.id],
+    snapshots: { [okta.id]: okta },
+    changes: [],
+    createdAt: "2026-10-18T00:00:00Z",
+    lastCheck: "2026-10-18T00:00:00Z",
+  };
+  for (const mode of ["threshold", "default-deny"] as const) {
+    const policy = policyFor(wl, "F", mode);
+    const entry = policy.ExtensionSettings[okta.id] as PolicyEntry;
+    assert.equal(entry.installation_mode, "allowed", mode);
+    assert.deepEqual(entry.runtime_allowed_hosts, ["*://*.accounts.google.com", "*://*.login.microsoftonline.com", "*://*.okta.com"], mode);
+    for (const host of ["*://*.accounts.google.com", "*://*.login.microsoftonline.com", "*://*.okta.com"]) {
+      assert.ok(!entry.runtime_blocked_hosts!.includes(host), mode + " " + host);
+    }
+  }
 });
 
 test("a tool exception matches the extension id, never the publisher-controlled name", () => {

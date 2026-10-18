@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { applySnapshots } from "../src/worker.js";
-import { logAudit, MAX_AUDIT, type Snapshot, type Watchlist } from "../src/store.js";
+import { appendAudit, logAudit, MAX_AUDIT, readAudit, type Snapshot, type Watchlist } from "../src/store.js";
 import type { Manifest } from "../src/types.js";
 
 const ID_A = "a".repeat(32);
@@ -144,18 +144,19 @@ test("a viewer never receives the audit log", async () => {
 
 test("creating a watchlist logs a created action", async () => {
   const mod = await import("../src/worker.js");
-  const { kv, store } = memKv();
+  const { kv } = memKv();
   const { manifestCrxForTest } = await import("./helpers.js");
   const body = manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "1", permissions: ["storage"] }) as unknown as BodyInit;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
   let created: { token: string } | undefined;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
   try {
-    const res = await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "Team", ids: [ID_A] }), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never);
+    const res = await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "Team", ids: [ID_A] }), env as never);
     created = await res.json() as { token: string };
   } finally { globalThis.fetch = real; }
   assert.ok(created?.token);
-  const wl = JSON.parse(store.get("wl:" + created.token)!.v) as { audit: { action: string }[]; name: string };
+  const wl = await (await mod.default.fetch(jsonReq("http://x/api/watchlists/" + created!.token, "GET"), env as never)).json() as { audit: { action: string }[]; name: string };
   assert.deepEqual(wl.audit.map((e) => e.action), ["created"]);
   assert.equal(wl.name, "Team");
 });
@@ -172,6 +173,52 @@ test("a rename keeps the webhook and logs only the rename", async () => {
   assert.equal(name, "New name");
   assert.match(webhook, /hooks\.slack\.com/);
   assert.deepEqual(audit.map((e) => e.action), ["webhook set", "renamed"]);
+});
+
+test("concurrent admin actions each keep their own audit entry", async () => {
+  const { call } = await seed();
+  const names = Array.from({ length: 12 }, (_, i) => "Team " + i);
+  await Promise.all(names.map((name) => call("/api/watchlists/" + ADMIN, "PUT", { name })));
+  const { audit } = await (await call("/api/watchlists/" + ADMIN, "GET")).json() as { audit: { action: string }[] };
+  assert.equal(audit.filter((e) => e.action === "renamed").length, 12, "12 rapid actions keep 12 entries");
+});
+
+test("the per-key audit log keeps the newest 100 entries", async () => {
+  const { kv } = memKv();
+  for (let i = 0; i < MAX_AUDIT + 25; i++) await appendAudit(kv, ADMIN, "action " + i);
+  const entries = await readAudit(kv, ADMIN);
+  assert.equal(entries.length, MAX_AUDIT);
+  assert.equal(entries[entries.length - 1]!.action, "action " + (MAX_AUDIT + 24));
+});
+
+test("rotate keeps every audit entry and adds the rotate entry on the new list", async () => {
+  const { call } = await seed();
+  for (let i = 0; i < 5; i++) await call("/api/watchlists/" + ADMIN, "PUT", { name: "Team " + i });
+  const { token } = await (await call("/api/watchlists/" + ADMIN + "/rotate", "POST")).json() as { token: string };
+  const { audit } = await (await call("/api/watchlists/" + token, "GET")).json() as { audit: { action: string }[] };
+  assert.equal(audit.length, 6);
+  assert.equal(audit.filter((e) => e.action === "renamed").length, 5);
+  assert.equal(audit[audit.length - 1]!.action, "rotate");
+});
+
+test("every CSV download is written to the audit log", async () => {
+  const { call } = await seed();
+  await call("/api/watchlists/" + ADMIN + "/export.csv");
+  await call("/api/watchlists/" + ADMIN + "/changes.csv");
+  await call("/api/watchlists/" + ADMIN + "/audit.csv");
+  const { audit } = await (await call("/api/watchlists/" + ADMIN, "GET")).json() as { audit: { action: string }[] };
+  const actions = audit.map((e) => e.action);
+  assert.ok(actions.includes("inventory exported"));
+  assert.ok(actions.includes("change log exported"));
+  assert.ok(actions.includes("audit exported"));
+});
+
+test("deleting a list removes its audit keys", async () => {
+  const { store, call } = await seed();
+  await call("/api/watchlists/" + ADMIN, "PUT", { webhook: WEBHOOK });
+  assert.ok([...store.keys()].some((k) => k.startsWith("au:" + ADMIN + ":")), "the action is stored under its own key");
+  assert.equal((await call("/api/watchlists/" + ADMIN, "DELETE")).status, 200);
+  assert.equal([...store.keys()].some((k) => k.startsWith("au:" + ADMIN + ":")), false, "the audit keys are removed with the list");
 });
 
 test("POST /privacy serves the static privacy page", async () => {

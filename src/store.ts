@@ -1,7 +1,8 @@
 import type { Assessment, Change, Manifest } from "./types.js";
 
-// One KV record per watchlist (key wl:<token>, metadata {lastCheck}) and one shared cache record per extension per day
-// (key ext:<id>). The 32-byte random token in the link is the only key to a watchlist; no personal data is stored.
+// One KV record per watchlist (key wl:<token>, metadata {lastCheck}), one shared cache record per extension per day
+// (key ext:<id>) and one KV key per audit entry (key au:<token>:<id>). The 32-byte random token in the link is the
+// only key to a watchlist; no personal data is stored.
 /** `transient` marks failures worth retrying (Google 5xx, timeouts); a definitive answer (not listed, 404, unreadable) counts as a check. */
 export interface Snapshot { id: string; manifest: Manifest | null; assessment: Assessment | null; error: string | null; checkedAt: string; transient?: boolean }
 export type LoggedChange = Omit<Change, "kind"> & { kind: string; id: string; at: string };
@@ -36,13 +37,72 @@ export async function load(kv: Kv, token: string): Promise<Watchlist | null> {
 
 export async function save(kv: Kv, token: string, wl: Watchlist): Promise<void> {
   wl.changes = wl.changes.slice(-MAX_CHANGES);
-  wl.audit = (wl.audit ?? []).slice(-MAX_AUDIT);
   await kv.put(`wl:${token}`, JSON.stringify(wl), { expirationTtl: IDLE_TTL, metadata: { lastCheck: wl.lastCheck } });
 }
 
-/** Append one admin action to a list, capped at the newest MAX_AUDIT entries. Tokens and webhook URLs are never written here. */
+/**
+ * Append one admin action in memory, capped at the newest MAX_AUDIT entries. The worker writes each
+ * action under its own KV key instead, so concurrent actions cannot overwrite each other.
+ * Tokens and webhook URLs are never written here.
+ */
 export function logAudit(wl: Watchlist, action: string): void {
   wl.audit = [...(wl.audit ?? []), { at: new Date().toISOString(), action }].slice(-MAX_AUDIT);
+}
+
+const AUDIT_PREFIX = "au:";
+let auditSeq = 0;
+
+/** A time-sortable, unique id so a listing of the prefix reads back in the order the actions happened. */
+function auditId(): string {
+  auditSeq = (auditSeq + 1) % 1_000_000;
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  const rand = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${Date.now().toString().padStart(13, "0")}-${auditSeq.toString().padStart(6, "0")}-${rand}`;
+}
+
+async function listAudit(kv: Kv, token: string): Promise<{ name: string; metadata?: unknown }[]> {
+  const prefix = `${AUDIT_PREFIX}${token}:`;
+  const keys: { name: string; metadata?: unknown }[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 25; page++) {
+    const res = await kv.list({ prefix, cursor });
+    for (const k of res.keys) if (k.name.startsWith(prefix)) keys.push(k);
+    if (res.list_complete || !res.cursor) break;
+    cursor = res.cursor;
+  }
+  return keys.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * Write one admin action under its own key, then drop the oldest when more than MAX_AUDIT remain.
+ * A concurrent action writes a different key, so neither can overwrite the other.
+ */
+export async function appendAudit(kv: Kv, token: string, action: string): Promise<void> {
+  await kv.put(`${AUDIT_PREFIX}${token}:${auditId()}`, "", { metadata: { at: new Date().toISOString(), action }, expirationTtl: IDLE_TTL });
+  const keys = await listAudit(kv, token);
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_AUDIT))) await kv.delete(k.name);
+}
+
+/** The newest `limit` admin actions for a list, oldest first. */
+export async function readAudit(kv: Kv, token: string, limit = MAX_AUDIT): Promise<AuditEntry[]> {
+  const out: AuditEntry[] = [];
+  for (const k of (await listAudit(kv, token)).slice(-limit)) {
+    const meta = k.metadata as { at?: unknown; action?: unknown } | undefined;
+    if (meta && typeof meta.action === "string") out.push({ at: typeof meta.at === "string" ? meta.at : "", action: meta.action });
+  }
+  return out;
+}
+
+async function moveAudit(kv: Kv, from: string, to: string): Promise<void> {
+  for (const k of await listAudit(kv, from)) {
+    const id = k.name.slice(`${AUDIT_PREFIX}${from}:`.length);
+    await kv.put(`${AUDIT_PREFIX}${to}:${id}`, "", { metadata: k.metadata, expirationTtl: IDLE_TTL });
+    await kv.delete(k.name);
+  }
+}
+
+async function deleteAudit(kv: Kv, token: string): Promise<void> {
+  for (const k of await listAudit(kv, token)) await kv.delete(k.name);
 }
 
 /**
@@ -56,9 +116,11 @@ export async function rotate(kv: Kv, token: string): Promise<{ token: string; vi
   const newAdmin = newToken();
   const newView = newToken();
   wl.viewToken = newView;
-  logAudit(wl, "rotate");
   await save(kv, newAdmin, wl);
   await kv.put(`vw:${newView}`, newAdmin, { expirationTtl: 400 * 86400 });
+  // The audit keys carry the list token, so move them to the new prefix, then record the rotation.
+  await moveAudit(kv, token, newAdmin);
+  await appendAudit(kv, newAdmin, "rotate");
   await kv.delete(`wl:${token}`);
   if (oldView) await kv.delete(`vw:${oldView}`);
   return { token: newAdmin, viewToken: newView };
@@ -69,6 +131,7 @@ export async function remove(kv: Kv, token: string): Promise<boolean> {
   if (!wl) return false;
   await kv.delete(`wl:${token}`);
   if (wl.viewToken) await kv.delete(`vw:${wl.viewToken}`);
+  await deleteAudit(kv, token);
   return true;
 }
 
