@@ -4,12 +4,13 @@ const $ = (selector, root) => (root || document).querySelector(selector);
 const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
 
 const GRADE_COLOR = { A: "green", B: "teal", C: "amber", D: "orange", F: "red" };
+const GRADE_RANK = { A: 0, B: 1, C: 2, D: 3, F: 4 };
 const SEVERITY_COLOR = { critical: "red", high: "orange", medium: "amber", low: "muted" };
 
 // Real, popular Web Store extensions, used by the sample button.
 const SAMPLE_IDS = [
   "aapbdbdomjkkjkaonfhkkikfgjllcleb",
-  "cjpalhdlnbpafiamejdnhcphjbkeiagm",
+  "gighmmpiobklfepjocnamgkkbiglidom",
   "nngceckbapebfimnlniiiahkandclblb",
   "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
   "kbfnbcaeplbcioakkpcpgfkobkghlhen",
@@ -376,17 +377,42 @@ function showWatchWarning(message) {
   node.hidden = !message;
 }
 
-function wireExports(token, admin) {
+function policyPreviewText(data, mode, threshold) {
+  const rank = GRADE_RANK[threshold] ?? GRADE_RANK.F;
+  const snaps = (data && data.snapshots) || {};
+  const ids = (data && data.ids) || Object.keys(snaps);
+  const blocked = ids.filter((id) => {
+    const grade = snaps[id] && snaps[id].assessment && snaps[id].assessment.grade;
+    return grade && (GRADE_RANK[grade] ?? GRADE_RANK.F) >= rank;
+  });
+  const names = blocked.map((id) => (snaps[id] && snaps[id].manifest && snaps[id].manifest.name) || id);
+  const list = names.length
+    ? names.slice(0, 8).join(", ") + (names.length > 8 ? " and " + (names.length - 8) + " more" : "")
+    : "none";
+  const count = blocked.length + " listed extension" + (blocked.length === 1 ? "" : "s");
+  if (mode === "default-deny") {
+    return "Default deny blocks every extension that is not on this list, and also blocks the " + count + " at or below grade " + threshold + ". Those are " + list + ".";
+  }
+  return "Threshold blocks only the " + count + " at or below grade " + threshold + ". Those are " + list + ". Extensions that are not on the list are not blocked.";
+}
+
+function wireExports(token, admin, data) {
   const base = "/api/watchlists/" + encodeURIComponent(token);
   $("#exportCsv").href = base + "/export.csv";
   $("#exportChanges").href = base + "/changes.csv";
   $("#policyTools").hidden = !admin;
   $("#policyNote").hidden = !admin;
+  $("#policyModes").hidden = !admin;
   const policy = $("#exportPolicy");
+  const mode = $("#policyMode");
   const threshold = $("#policyThreshold");
+  const preview = $("#policyPreview");
   const update = () => {
-    policy.href = base + "/policy.json?threshold=" + encodeURIComponent(threshold.value);
+    policy.href = base + "/policy.json?threshold=" + encodeURIComponent(threshold.value) + "&mode=" + encodeURIComponent(mode.value);
+    preview.textContent = policyPreviewText(data, mode.value, threshold.value);
+    preview.hidden = !admin;
   };
+  mode.onchange = update;
   threshold.onchange = update;
   update();
 }
@@ -403,7 +429,7 @@ function renderWatchlist(data, token) {
   $("#adminNote").hidden = !admin;
   $("#alertSection").hidden = !admin;
   $("#watchExports").hidden = false;
-  wireExports(token, admin);
+  wireExports(token, admin, data);
   if (admin) wireAlerts(token, data && data.webhookSet ? data.webhook : null);
   let del = document.getElementById("watchDelete");
   if (!admin) {

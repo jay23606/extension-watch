@@ -6953,7 +6953,7 @@ zuerich
 `;
 const RULES: ReadonlySet<string> = new Set(RULES_DATA.split("\n"));
 
-/** True when the host is itself a public suffix such as com, co.uk or github.io, or a wildcard suffix such as foo.ck. */
+/** True when the host is itself a public suffix such as com or co.uk, or a wildcard suffix such as foo.ck. */
 export function isPublicSuffix(host: string): boolean {
   const p = host.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
   if (!p) return false;

@@ -14,7 +14,8 @@ test("the sample button fills the form with 8 real extension IDs", () => {
   assert.equal(ids.length, 8);
   assert.equal(new Set(ids).size, 8);
   assert.ok(ids.includes("aapbdbdomjkkjkaonfhkkikfgjllcleb"));
-  assert.ok(ids.includes("cjpalhdlnbpafiamejdnhcphjbkeiagm"));
+  assert.ok(ids.includes("gighmmpiobklfepjocnamgkkbiglidom"));
+  assert.ok(!ids.includes("cjpalhdlnbpafiamejdnhcphjbkeiagm"));
   assert.match(app, /SAMPLE_IDS\.join\("\\n"\)/);
 });
 
@@ -41,4 +42,30 @@ test("the page warns when the 50 cap drops IDs and when most IDs are missing", (
   assert.match(app, /Most IDs were not on the Chrome Web Store/);
   assert.match(app, /Most IDs in this list are not on the Chrome Web Store/);
   assert.match(html, /id="watchWarning"/);
+});
+
+// R6: policy mode selector, a preview of what is blocked, and the corrected deployment note.
+test("the export tools offer both policy modes and a preview", () => {
+  assert.match(html, /id="policyMode"/);
+  assert.match(html, /value="threshold" selected/);
+  assert.match(html, /value="default-deny"/);
+  assert.match(html, /id="policyPreview"/);
+  assert.match(app, /policyPreviewText/);
+  assert.match(app, /\/policy\.json\?threshold=/);
+  assert.match(app, /&mode=/);
+});
+
+test("default deny is described as blocking every extension not on the list", () => {
+  assert.match(app, /blocks every extension that is not on this list/);
+  assert.match(app, /Extensions that are not on the list are not blocked/);
+  assert.match(html, /Default deny blocks every extension that is not on the list/);
+});
+
+test("the deployment note names the console, Group Policy, plist and Linux routes", () => {
+  assert.match(html, /Custom Configurations/);
+  assert.match(html, /Chrome Enterprise Core/);
+  assert.match(html, /Chrome Group Policy/);
+  assert.match(html, /configuration profile plist/);
+  assert.match(html, /\/etc\/opt\/chrome\/policies\/managed\//);
+  assert.doesNotMatch(html, /Additional Google services/);
 });

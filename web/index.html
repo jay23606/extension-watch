@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="Extension Watch reviews the Chrome extensions your team uses, scores their risk, and alerts you when an update silently adds permissions." />
   <meta name="theme-color" content="#0a0d14" />
-  <title>Extension Watch — know what your Chrome extensions can do</title>
+  <title>Extension Watch. Know what your Chrome extensions can do</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -47,7 +47,7 @@
 
       <section class="pricing" aria-labelledby="pricing-heading">
         <h2 class="section-title" id="pricing-heading">Pricing</h2>
-        <p class="page-note">Planned plans. Billing is not connected yet; today every list gets daily checks and webhook alerts.</p>
+        <p class="page-note">Planned plans. Billing is not connected yet. During the hackathon every list gets daily checks, webhook alerts, and the CSV and policy exports at no cost.</p>
         <div class="pricing__grid">
           <article class="plan">
             <h3 class="plan__name">Free</h3>
@@ -148,6 +148,11 @@
           <a id="exportCsv" class="btn btn--ghost btn--small" href="#" download>Download inventory CSV</a>
           <a id="exportChanges" class="btn btn--ghost btn--small" href="#" download>Download change log CSV</a>
           <span id="policyTools" hidden>
+            <label for="policyMode">Policy mode</label>
+            <select id="policyMode" class="policy-threshold">
+              <option value="threshold" selected>Threshold</option>
+              <option value="default-deny">Default deny</option>
+            </select>
             <label for="policyThreshold">Policy block threshold</label>
             <select id="policyThreshold" class="policy-threshold">
               <option value="F">F</option>
@@ -158,7 +163,9 @@
             <a id="exportPolicy" class="btn btn--ghost btn--small" href="#" download>Download Chrome policy JSON</a>
           </span>
         </p>
-        <p id="policyNote" class="page-note" hidden>To apply the policy, open the Google Admin console, go to Apps, Additional Google services, Chrome Web Store, then ExtensionSettings. Paste the downloaded JSON as the policy value and save.</p>
+        <p id="policyPreview" class="page-note" hidden></p>
+        <p id="policyModes" class="page-note" hidden>Threshold mode blocks only the listed extensions graded at or below the threshold. Default deny blocks every extension that is not on the list.</p>
+        <p id="policyNote" class="page-note" hidden>To apply the policy, open the Google Admin console, go to Chrome browser, then Custom Configurations under Chrome Enterprise Core. Paste the downloaded JSON as the ExtensionSettings policy value. On Windows, deploy the same JSON through the Chrome Group Policy templates. On macOS, add it to the com.google.Chrome configuration profile plist. On Linux, write it to a file under /etc/opt/chrome/policies/managed/.</p>
       </div>
 
       <section aria-labelledby="changes-heading">

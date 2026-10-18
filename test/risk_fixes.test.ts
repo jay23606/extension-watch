@@ -140,3 +140,60 @@ test("rule table keeps unique codes and a non-empty detail for every rule", () =
   assert.equal(codes.size, RULES.length);
   for (const rule of RULES) assert.ok(rule.detail.length > 0, rule.code);
 });
+
+// R6: sensitive host check covers content scripts and optional permissions, and the new domains.
+test("a content script match on a sensitive site scores as sensitive site access", () => {
+  const a = assess(manifest({ contentScriptMatches: ["https://mail.google.com/*"] }));
+  assert.equal(a.score, 15);
+  assert.equal(a.findings.length, 1);
+  assert.equal(a.findings[0]!.code, "sensitive_hosts");
+  assert.match(a.findings[0]!.title, /content script/);
+  assert.equal(a.findings[0]!.points, 15);
+});
+
+test("a sensitive host and a sensitive content script still count once at 15", () => {
+  const a = assess(manifest({ hostPermissions: ["https://mail.google.com/*"], contentScriptMatches: ["https://app.slack.com/*"] }));
+  assert.equal(a.score, 15);
+  assert.equal(a.findings.filter((f) => f.code === "sensitive_hosts").length, 2);
+  assert.equal(a.grade, "A");
+});
+
+test("an optional permission on a sensitive site is labelled and worth 0 points", () => {
+  const a = assess(manifest({ optionalPermissions: ["https://acme.sharepoint.com/*"] }));
+  assert.equal(a.score, 0);
+  assert.equal(a.grade, "A");
+  assert.equal(a.findings.length, 1);
+  assert.equal(a.findings[0]!.points, 0);
+  assert.equal(a.findings[0]!.severity, "low");
+  assert.equal(a.findings[0]!.title, "Can request later: Sensitive site access (https://acme.sharepoint.com/*)");
+});
+
+test("the new Microsoft 365, Slack, Workday, Atlassian and Google admin hosts are sensitive", () => {
+  for (const host of ["outlook.office365.com", "app.slack.com", "admin.google.com", "sharepoint.com", "myworkday.com", "atlassian.net"]) {
+    for (const pattern of [`https://${host}/*`, `*://*.${host}/*`]) {
+      assert.equal(isSensitive(pattern), true, pattern);
+    }
+  }
+  for (const pattern of ["https://acme.sharepoint.com/*", "https://acme.myworkday.com/*", "https://acme.atlassian.net/*", "https://tenant.sharepoint.com/*"])
+    assert.equal(isSensitive(pattern), true, pattern);
+});
+
+test("a bare parent domain and a documentation subdomain are not sensitive", () => {
+  for (const pattern of ["*://*.amazon.com/*", "https://amazon.com/*", "https://docs.github.com/*", "https://api.sub.github.com/*", "https://docs.google.com/*"])
+    assert.equal(isSensitive(pattern), false, pattern);
+  assert.equal(isSensitive("https://github.com/*"), true);
+  assert.equal(assess(manifest({ hostPermissions: ["https://docs.github.com/*"] })).score, 0);
+});
+
+test("notifications, readingList, tabGroups and tts score low", () => {
+  const expected: Array<[string, string]> = [["notifications", "notifications"], ["readingList", "reading_list"], ["tabGroups", "tab_groups"], ["tts", "text_to_speech"]];
+  for (const [permission, code] of expected) {
+    const a = assess(manifest({ permissions: [permission] }));
+    assert.equal(a.findings.length, 1, permission);
+    assert.equal(a.findings[0]!.code, code);
+    assert.equal(a.findings[0]!.points, 2);
+    assert.equal(a.findings[0]!.severity, "low");
+    assert.equal(a.grade, "A");
+  }
+  assert.equal(assess(manifest({ permissions: ["notifications", "readingList", "tabGroups", "tts"] })).score, 8);
+});

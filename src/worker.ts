@@ -2,7 +2,7 @@ import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
 import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, remove, resolveView, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
-import { changesCsv, inventoryCsv, policyFor, thresholdFrom } from "./export.js";
+import { changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
@@ -162,7 +162,9 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
     const query = new URL(req.url).searchParams;
     const threshold = thresholdFrom(query.get("threshold") ?? query.get("grade"));
     if (!threshold) throw new FetchError(400, "Use a grade threshold from A to F.");
-    return new Response(JSON.stringify(policyFor(wl, threshold), null, 2), {
+    const mode = modeFrom(query.get("mode"));
+    if (!mode) throw new FetchError(400, "Use a policy mode of threshold or default-deny.");
+    return new Response(JSON.stringify(policyFor(wl, threshold, mode), null, 2), {
       headers: { "content-type": "application/json", "content-disposition": 'attachment; filename="chrome-extension-policy.json"' },
     });
   }
@@ -237,7 +239,10 @@ const routes: Record<string, Handler> = {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    return secure(await route(request, env));
+    const res = secure(await route(request, env));
+    // A response that can carry a watchlist token or an export must never be stored by a shared cache.
+    if (new URL(request.url).pathname.startsWith("/api/")) res.headers.set("cache-control", "no-store");
+    return res;
   },
   async scheduled(_event: unknown, env: Env & { ORIGIN?: string }): Promise<void> {
     const budget: Budget = { left: FETCH_BUDGET, kv: KV_BUDGET };

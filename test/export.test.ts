@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { assess } from "../src/risk";
-import { csvCell } from "../src/export";
+import { csvCell, inventoryCsv, modeFrom, policyFor } from "../src/export";
 import type { Snapshot, Watchlist } from "../src/store";
 import type { Manifest } from "../src/types";
 
@@ -46,7 +46,7 @@ function memKv() {
   return { store, kv };
 }
 
-type PolicyEntry = { installation_mode: string; blocked_permissions?: string[]; runtime_blocked_hosts?: string[] };
+type PolicyEntry = { installation_mode: string; blocked_permissions?: string[]; runtime_blocked_hosts?: string[]; runtime_allowed_hosts?: string[] };
 type Policy = { ExtensionSettings: Record<string, PolicyEntry> };
 
 // Scheme, then ://, then an optional wildcard label and a host. No path and no port.
@@ -110,7 +110,7 @@ test("change log export is CSV and names the extension", async () => {
 
 test("policy JSON blocks grades at or below the threshold and includes the sensitive hosts", async () => {
   const { get } = await seedList();
-  const res = await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D`);
+  const res = await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D&mode=default-deny`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type") ?? "", /application\/json/);
   const policy = await res.json() as Policy;
@@ -128,7 +128,7 @@ test("policy JSON blocks grades at or below the threshold and includes the sensi
 
 test("every runtime_blocked_hosts entry is a Chrome host pattern with no path or port", async () => {
   const { get } = await seedList();
-  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D`)).json() as Policy;
+  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D&mode=default-deny`)).json() as Policy;
   const hosts = policy.ExtensionSettings["*"]!.runtime_blocked_hosts!;
   assert.ok(hosts.length > 0);
   assert.equal(new Set(hosts).size, hosts.length);
@@ -144,7 +144,7 @@ test("every runtime_blocked_hosts entry is a Chrome host pattern with no path or
 
 test("an allowed extension repeats the permission and host blocks from the star entry", async () => {
   const { get } = await seedList();
-  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json`)).json() as Policy;
+  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json?mode=default-deny`)).json() as Policy;
   const all = policy.ExtensionSettings["*"]!;
   const allowed = Object.entries(policy.ExtensionSettings).filter(([id, entry]) => id !== "*" && entry.installation_mode === "allowed");
   assert.deepEqual(allowed.map(([id]) => id).sort(), [ID_A, ID_D].sort());
@@ -180,4 +180,97 @@ test("an unknown watchlist token gets 404 for every export", async () => {
   for (const file of ["export.csv", "changes.csv", "policy.json"]) {
     assert.equal((await get(`/api/watchlists/${"Q".repeat(43)}/${file}`)).status, 404, file);
   }
+});
+
+// R6: CSV injection. A cell that starts with a formula character is prefixed with a single quote.
+test("CSV cells that start with a formula character get a single quote prefix", () => {
+  assert.equal(csvCell("=HYPERLINK(\"http://x\")"), "\"'=HYPERLINK(\"\"http://x\"\")\"");
+  assert.equal(csvCell("=1+1"), "'=1+1");
+  assert.equal(csvCell("+1+1"), "'+1+1");
+  assert.equal(csvCell("-1+1"), "'-1+1");
+  assert.equal(csvCell("@SUM(A1)"), "'@SUM(A1)");
+  assert.equal(csvCell("\tcmd"), "'\tcmd");
+  assert.equal(csvCell("\rcmd"), "\"'\rcmd\"");
+  assert.equal(csvCell("plain"), "plain");
+});
+
+test("a hostile extension name is neutralised in the inventory export", () => {
+  const hostile = manifest(ID_A, { name: '=HYPERLINK("http://x")' });
+  const wl: Watchlist = {
+    name: "Team",
+    ids: [ID_A],
+    snapshots: { [ID_A]: snapshot(hostile) },
+    changes: [],
+    createdAt: "2026-10-18T00:00:00Z",
+    lastCheck: "2026-10-18T00:00:00Z",
+  };
+  const out = inventoryCsv(wl);
+  assert.ok(out.includes("\"'=HYPERLINK"), out);
+  assert.ok(!out.includes(",=HYPERLINK"), out);
+});
+
+test("exports and token responses are not cached", async () => {
+  const { get } = await seedList();
+  for (const path of [`/api/watchlists/${ADMIN}/export.csv`, `/api/watchlists/${ADMIN}/changes.csv`, `/api/watchlists/${ADMIN}/policy.json`, `/api/watchlists/${ADMIN}`, `/api/watchlists/${VIEWER}`]) {
+    assert.equal((await get(path)).headers.get("cache-control"), "no-store", path);
+  }
+});
+
+// R6: two policy modes. Threshold is the default; default deny keeps the old catch-all block.
+test("modeFrom defaults to threshold and rejects an unknown mode", () => {
+  assert.equal(modeFrom(null), "threshold");
+  assert.equal(modeFrom(""), "threshold");
+  assert.equal(modeFrom("threshold"), "threshold");
+  assert.equal(modeFrom("DEFAULT-DENY"), "default-deny");
+  assert.equal(modeFrom("nope"), null);
+});
+
+test("threshold mode leaves the wildcard unblocked and only touches listed extensions", async () => {
+  const { get } = await seedList();
+  const res = await get(`/api/watchlists/${ADMIN}/policy.json`);
+  assert.equal(res.status, 200);
+  const policy = await res.json() as Policy;
+  const all = policy.ExtensionSettings["*"]!;
+  assert.equal(all.installation_mode, undefined);
+  assert.deepEqual(all.blocked_permissions, ["debugger"]);
+  assert.equal(all.runtime_blocked_hosts, undefined);
+  // Default threshold is F, so only the F extension is blocked. D and A are allowed, the unreadable X is allowed.
+  assert.equal(policy.ExtensionSettings[ID_A]!.installation_mode, "allowed");
+  assert.equal(policy.ExtensionSettings[ID_D]!.installation_mode, "allowed");
+  assert.equal(policy.ExtensionSettings[ID_F]!.installation_mode, "blocked");
+  assert.equal(policy.ExtensionSettings[ID_X]!.installation_mode, "allowed");
+});
+
+test("threshold mode allows only at or below the threshold and rejects an unknown mode", async () => {
+  const { get } = await seedList();
+  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D&mode=threshold`)).json() as Policy;
+  assert.equal(policy.ExtensionSettings[ID_A]!.installation_mode, "allowed");
+  assert.equal(policy.ExtensionSettings[ID_D]!.installation_mode, "blocked");
+  assert.equal(policy.ExtensionSettings[ID_F]!.installation_mode, "blocked");
+  assert.equal((await get(`/api/watchlists/${ADMIN}/policy.json?mode=nope`)).status, 400);
+});
+
+test("an allowed password manager keeps its vendor domain and gets its sign-in hosts", () => {
+  const bitwarden = snapshot(manifest("b".repeat(32), { name: "Bitwarden Password Manager" }));
+  const onepassword = snapshot(manifest("c".repeat(32), { name: "1Password" }));
+  const wl: Watchlist = {
+    name: "Team",
+    ids: [bitwarden.id, onepassword.id],
+    snapshots: { [bitwarden.id]: bitwarden, [onepassword.id]: onepassword },
+    changes: [],
+    createdAt: "2026-10-18T00:00:00Z",
+    lastCheck: "2026-10-18T00:00:00Z",
+  };
+  const policy = policyFor(wl, "D", "default-deny");
+  const bw = policy.ExtensionSettings[bitwarden.id] as PolicyEntry;
+  assert.equal(bw.installation_mode, "allowed");
+  assert.ok(!bw.runtime_blocked_hosts!.includes("*://*.bitwarden.com"));
+  assert.deepEqual(bw.runtime_blocked_hosts!.filter((h) => h.includes("bitwarden")), []);
+  assert.deepEqual(bw.runtime_allowed_hosts, ["*://*.vault.bitwarden.com"]);
+  const op = policy.ExtensionSettings[onepassword.id] as PolicyEntry;
+  assert.equal(op.installation_mode, "allowed");
+  assert.deepEqual(op.runtime_blocked_hosts!.filter((h) => h.includes("1password")), []);
+  assert.deepEqual(op.runtime_allowed_hosts, ["*://*.my.1password.com", "*://*.start.1password.com"]);
+  // The rest of the sensitive hosts still stand.
+  assert.ok(bw.runtime_blocked_hosts!.includes("*://*.okta.com"));
 });

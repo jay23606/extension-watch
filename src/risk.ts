@@ -62,6 +62,10 @@ export const RULES: Rule[] = [
   { code: "externally_connectable_all", group: "externally_connectable", title: "Externally connectable everywhere", points: 15, severity: severityFor(15), detail: "Any website can send messages to the extension." },
   { code: "csp_unsafe", group: "csp", title: "Unsafe content security policy", points: 20, severity: severityFor(20), detail: "CSP allows 'unsafe-eval' or remote script hosts." },
   { code: "update_url_external", group: "update_url", title: "External update URL", points: 15, severity: severityFor(15), detail: "Updates come from a host outside Google." },
+  { code: "notifications", group: "notifications", title: "Notifications", points: 2, severity: severityFor(2), detail: "Shows desktop notifications outside your apps." },
+  { code: "reading_list", group: "reading_list", title: "Reading list", points: 2, severity: severityFor(2), detail: "Reads and changes the browser reading list." },
+  { code: "tab_groups", group: "tab_groups", title: "Tab groups", points: 2, severity: severityFor(2), detail: "Reads and changes tab groups." },
+  { code: "text_to_speech", group: "text_to_speech", title: "Text to speech", points: 2, severity: severityFor(2), detail: "Speaks text through the browser voice." },
 ];
 
 const RULE_MAP: Map<string, Rule> = new Map(RULES.map((r) => [r.code, r]));
@@ -105,11 +109,15 @@ const PERMISSION_POINTS: Record<string, number> = {
   "system.memory": 4,
   "system.storage": 4,
   webAuthenticationProxy: 15,
+  notifications: 2,
+  readingList: 2,
+  tabGroups: 2,
+  tts: 2,
 };
 
-/** Mail, single sign-on, password, banking, CRM and cloud console sites. */
+/** Mail, single sign-on, password, banking, CRM, collaboration and cloud console sites. */
 export const SENSITIVE_DOMAINS: readonly string[] = [
-  "mail.google.com", "gmail.com", "outlook.office.com", "outlook.live.com", "mail.yahoo.com", "proton.me", "protonmail.com",
+  "mail.google.com", "gmail.com", "outlook.office.com", "outlook.office365.com", "outlook.live.com", "mail.yahoo.com", "proton.me", "protonmail.com",
   "accounts.google.com", "login.microsoftonline.com", "login.microsoft.com", "okta.com", "auth0.com", "onelogin.com",
   "pingidentity.com", "duo.com", "jumpcloud.com",
   "1password.com", "bitwarden.com", "lastpass.com", "dashlane.com", "keepersecurity.com", "keepersecurity.eu", "nordpass.com",
@@ -118,7 +126,14 @@ export const SENSITIVE_DOMAINS: readonly string[] = [
   "salesforce.com", "force.com", "hubspot.com", "dynamics.com", "zoho.com", "pipedrive.com", "monday.com",
   "console.aws.amazon.com", "aws.amazon.com", "portal.azure.com", "azure.com", "console.cloud.google.com",
   "cloud.google.com", "admin.google.com", "github.com", "gitlab.com", "bitbucket.org",
+  "sharepoint.com", "app.slack.com", "myworkday.com", "atlassian.net",
 ];
+
+/**
+ * Hosts that count only as the exact host, not through a subdomain. Code hosting is sensitive as the
+ * site itself; a documentation or pages subdomain such as docs.github.com is not a sign-in site.
+ */
+const EXACT_ONLY_HOSTS: ReadonlySet<string> = new Set(["github.com", "gitlab.com", "bitbucket.org"]);
 
 function hostOf(pattern: string): string | null {
   const match = /^(?:\*|https?|wss?|ftp):\/\/([^/]+)/.exec(pattern.trim().toLowerCase());
@@ -127,13 +142,16 @@ function hostOf(pattern: string): string | null {
   return host || null;
 }
 
-/** True when a host permission includes a mail, identity, password, banking, CRM or cloud console domain. */
+/**
+ * True when a pattern targets a listed sensitive host or one of its subdomains. A pattern for a bare
+ * parent such as *.amazon.com is not sensitive, because only the listed hosts and their subdomains count.
+ */
 export function isSensitive(pattern: string): boolean {
   const raw = hostOf(pattern);
   if (!raw) return false;
   const host = raw.startsWith("*.") ? raw.slice(2) : raw;
   if (!host.includes(".")) return false;
-  return SENSITIVE_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`) || d.endsWith(`.${host}`));
+  return SENSITIVE_DOMAINS.some((d) => host === d || (!EXACT_ONLY_HOSTS.has(d) && host.endsWith(`.${d}`)));
 }
 
 /** Chrome ignores the path of a host permission, so any scheme with a bare path grants every site. */
@@ -210,6 +228,9 @@ export function assess(m: Manifest): Assessment {
 
   if (broad) items.push(rule("broad_hosts"));
   if (m.hostPermissions.some(isSensitive)) items.push(rule("sensitive_hosts"));
+  if (m.contentScriptMatches.some(isSensitive)) {
+    items.push({ ...rule("sensitive_hosts"), title: "Sensitive site access (content script)", detail: "Content scripts reach a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." });
+  }
   if (m.permissions.includes("debugger")) items.push(rule("debugger"));
   if (m.permissions.includes("nativeMessaging")) items.push(rule("native_messaging"));
   if (m.permissions.includes("userScripts")) items.push(rule("user_scripts"));
@@ -238,6 +259,10 @@ export function assess(m: Manifest): Assessment {
   if (m.permissions.includes("proxy")) items.push(rule("proxy"));
   if (m.permissions.includes("privacy")) items.push(rule("privacy"));
   if (m.permissions.includes("tabs")) items.push(rule("tabs"));
+  if (m.permissions.includes("notifications")) items.push(rule("notifications"));
+  if (m.permissions.includes("readingList")) items.push(rule("reading_list"));
+  if (m.permissions.includes("tabGroups")) items.push(rule("tab_groups"));
+  if (m.permissions.includes("tts")) items.push(rule("text_to_speech"));
   if (m.permissions.includes("scripting")) items.push(rule("scripting", broad ? 25 : 8));
   if (m.permissions.includes("clipboardRead")) items.push(rule("clipboard_read"));
   if (m.permissions.includes("desktopCapture") || m.permissions.includes("tabCapture")) items.push(rule("screen_capture"));
@@ -250,7 +275,13 @@ export function assess(m: Manifest): Assessment {
   if (m.updateUrl && !isGoogleHost(m.updateUrl)) items.push(rule("update_url_external"));
 
   for (const p of m.optionalPermissions) {
-    items.push({ code: "optional", group: "optional", title: `Can request later: ${p}`, detail: "Requestable at runtime; not granted on install.", points: 0 });
+    const sensitive = isSensitive(p);
+    items.push({
+      code: "optional", group: "optional",
+      title: sensitive ? `Can request later: Sensitive site access (${p})` : `Can request later: ${p}`,
+      detail: sensitive ? "Requestable at runtime for a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." : "Requestable at runtime; not granted on install.",
+      points: 0,
+    });
   }
 
   items.sort((a, b) => b.points - a.points || a.code.localeCompare(b.code));

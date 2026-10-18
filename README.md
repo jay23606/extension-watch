@@ -15,10 +15,10 @@ Every company runs dozens of browser extensions that nobody reviewed. Extensions
 3. It grades each extension's access from A (little) to F (a lot) with a published rule set, and lists every finding with its points.
 4. "Watch this list" saves an admin link and a read-only link. Every day it reads every extension again (a list larger than one run's download budget finishes over the next runs, and stays due until every extension got an answer) and records each change. A change can be a permission or site access added, content scripts that reach new sites, a looser script policy, updates moved off the Web Store, a jump in the access score, a new version, or an extension pulled from the store.
 5. Add a Slack, Discord or Google Chat webhook (or any public https endpoint that takes JSON) and changes of medium severity or higher arrive as one message after each check.
-6. Export the list as CSV, or download a Chrome ExtensionSettings policy from the admin link. The policy blocks grades at or below a threshold you choose, blocks the debugger permission, and blocks runtime access to sensitive domains such as mail, single sign-on, password, banking, CRM and cloud consoles. Host patterns carry no path, and each allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry.
+6. Export the list as CSV, or download a Chrome ExtensionSettings policy from the admin link. The policy has two modes. Threshold mode, the default, leaves the catch-all unblocked and blocks only the listed extensions graded at or below a threshold you choose. Default deny mode blocks every extension that is not on the list. Both modes block the debugger permission, block runtime access to sensitive domains such as mail, single sign-on, password, banking, CRM and cloud consoles, and keep a password manager or sign-on tool reachable on its own vendor and sign-in domains. Host patterns carry no path, and each allowed extension repeats the blocks because Chrome does not inherit them from the catch-all entry.
 7. The start page has a sample team list button with eight real popular extensions. The page warns when the 50 extension cap drops IDs or when most IDs are not found in the store.
 
-The grade measures access, not intent. A password manager needs to read every page, so it grades high (Bitwarden C 46, 1Password F 97 when checked on 18 October 2026), and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
+The grade measures access, not intent. A password manager needs to read every page, so it grades high, and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
 
 ## Screenshots
 
@@ -43,7 +43,7 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 - Packages are streamed, never stored. Google ignores range requests for large packages, so the Worker streams the whole package once and keeps only three things. Those are the first 64 KB, the last 2 MB (where the ZIP index lives), and the bytes after each local header named `manifest.json` or `_locales/<x>/messages.json`. It then reads `manifest.json` at the offset the ZIP index gives and checks that the local header there carries the same name, so a decoy manifest hidden inside another file cannot change the grade. A package with two index entries for `manifest.json` is refused, and a package that could be read before but not after an update is logged and alerted as a high-severity change. Memory follows the size of the wanted entries, not the package. Captures end at the next local header, and entries that inflate past 4 MB are refused. In production, Keeper (a 143 MB package) and RoboForm were read together in 5.5 s. When Google does honour ranges, only the needed parts are fetched. If the name is still a locale key, the display name comes from the extension's Web Store page.
 - The ZIP and DEFLATE decoding is written in the Worker, with no zip library. It handles CRX2, CRX3, data-descriptor entries, comments and a BOM in manifests.
 - Each extension is downloaded at most once a day, whatever the number of watchlists that contain it, and definitive failures (removed from the store, unreadable) are cached for the day too. A cron run checks at most 150 due lists, downloads at most 40 packages and spends at most 800 KV operations (Cloudflare allows 1,000 per invocation). Whatever is left waits for the next run, 10 minutes later. In a test with 600 watchlists sharing one extension, 4 runs (40 minutes) checked all 600 with 1 download.
-- Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50. A Cloudflare rate limiting binding is configured for writes (20 a minute per address). Cloudflare applies it per location and approximately, so treat it as a brake, not a hard cap. Daily counters (200 scans, 20 watchlists and 10 test alerts per address) are approximate under parallel requests too.
+- Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50. Per-address daily limits are enforced in Workers KV, at 200 scans, 20 new watchlists and 10 test alerts. They are approximate under parallel requests.
 
 ## Data model (Workers KV)
 
@@ -69,7 +69,7 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | `GET /api/rules` | The full points table |
 | `GET /api/watchlists/<token>/export.csv` | Inventory as CSV, for the admin and read-only links |
 | `GET /api/watchlists/<token>/changes.csv` | Change log as CSV, for the admin and read-only links |
-| `GET /api/watchlists/<admin token>/policy.json?threshold=D` | Chrome ExtensionSettings policy, admin link only |
+| `GET /api/watchlists/<admin token>/policy.json?threshold=D&mode=threshold` | Chrome ExtensionSettings policy, admin link only. Mode is threshold (default) or default-deny |
 
 ## Methodology
 
@@ -85,14 +85,15 @@ The full points table is public at `/api/rules` and on the Methodology page. Som
 | `cookies`, `management`, `proxy` | 15 each |
 | Updates from a server other than Google | 15 |
 | Manifest V2 (deprecated) | 10 |
+| `notifications`, `readingList`, `tabGroups`, `tts` | 2 each |
 
 Rules that describe the same power are grouped, and a group counts once at its highest value. For example, broad host access, content scripts on all sites and script injection all mean "can run code on every site", so together they count 30, not 58. The grade bands are 0 to 19 A, 20 to 39 B, 40 to 59 C, 60 to 79 D, 80 and above F. Optional permissions are listed as "can request later" with 0 points, because the browser does not grant them at install. Every rule is deterministic. The same manifest always gives the same grade, and no model is involved.
 
 Chrome shows an install warning for several permissions that now carry points. They include webNavigation, topSites, bookmarks, identity.email, contentSettings, browsingData, pageCapture, sessions, tabCapture, desktopCapture, downloads, management, privacy, proxy, geolocation, clipboardRead, nativeMessaging and declarativeNetRequestFeedback. An update that adds webNavigation, topSites and identity.email reaches 30 points and raises an alert.
 
-Broad host access is decided with the ICANN public suffix list. "https://publicsuffix.org/list/public_suffix_list.dat" is downloaded and stored as a generated module, so `*://*.co.uk/*` and `*://*.com/*` grant every site, while `*://*.bit.ly/*`, `*://*.x.ai/*` and `*://*.t.co/*` grant one domain. Host permissions on mail, single sign-on, password, banking, CRM and cloud console sites add 15 points as Sensitive site access.
+Broad host access is decided with the ICANN public suffix list. "https://publicsuffix.org/list/public_suffix_list.dat" is downloaded and stored as a generated module, so `*://*.co.uk/*` and `*://*.com/*` grant every site, while `*://*.bit.ly/*`, `*://*.x.ai/*` and `*://*.t.co/*` grant one domain. Host permissions and content script matches on mail, single sign-on, password, banking, CRM, collaboration and cloud console sites add 15 points as Sensitive site access, and optional permissions on those sites are listed with 0 points. Only the listed hosts and their subdomains count, so a wildcard for a bare parent such as `*.amazon.com` is not sensitive.
 
-Checked against 50 popular extensions in production on 17 October 2026 (UTC), with the shared cache cleared so only the deployed code ran. Of those, 46 were read (the other 4 are no longer in the store) and graded 9 A, 12 B, 16 C, 6 D and 3 F, with no `'wasm-unsafe-eval'` policy mistaken for `'unsafe-eval'`. The password managers came out as Bitwarden C 46, Keeper C 56, LastPass C 59, Dashlane D 71, RoboForm F 83, 1Password F 97.
+The first production check ran on 18 October 2026 with the shared cache cleared so only the deployed code ran. The grading is deterministic, so the same manifests always give the same grades, and no `'wasm-unsafe-eval'` policy was mistaken for `'unsafe-eval'`.
 
 ## Privacy and security
 
@@ -104,7 +105,7 @@ Checked against 50 popular extensions in production on 17 October 2026 (UTC), wi
 
 ## Exports
 
-The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold. In the Google Admin console open Apps, Additional Google services, Chrome Web Store, then ExtensionSettings and paste the JSON. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry, and a blocked extension needs only the blocked install mode.
+The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold and a mode. Threshold mode, the default, leaves the catch-all unblocked and blocks only the listed extensions graded at or below the threshold. Default deny mode blocks every extension that is not on the list. In the Google Admin console, open Chrome browser, then Custom Configurations under Chrome Enterprise Core, and paste the JSON. The same JSON can be deployed through the Chrome Group Policy templates on Windows, added to the com.google.Chrome configuration profile plist on macOS, or written to a file under /etc/opt/chrome/policies/managed/ on Linux. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry. A password manager or sign-on tool keeps its own vendor domains out of runtime_blocked_hosts and gets the sign-in domains it needs as runtime_allowed_hosts. A blocked extension needs only the blocked install mode. CSV and policy export are free during the hackathon, and billing is not connected in this version.
 
 ## Pricing (planned, billing is not connected in this version)
 
@@ -116,13 +117,25 @@ The watchlist page has download buttons for the inventory CSV and the change log
 
 The cost to serve a watchlist is at most one streamed download per extension per day on Cloudflare Workers, shared across every customer who watches that extension (an estimate, not yet measured at scale), so the gross margin on Team stays above 90 percent. Revenue grows with the number of extensions watched, which grows with company size.
 
+## Built and planned
+
+| Built in this version | Planned |
+|---|---|
+| Scan and grade up to 25 extensions | Billing and paid plans |
+| Shared daily cache, one download per extension a day | Email alerts |
+| Watchlist checks every 10 minutes and a change log | Single sign-on |
+| Slack, Discord and Google Chat webhook alerts | Audit log |
+| Read-only link and admin link for every watchlist | Unlimited extensions |
+| CSV inventory and change log export | |
+| Chrome ExtensionSettings policy export in two modes | |
+
 ## Run it
 
 ```bash
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npm test                                      # 164 tests, no network
+npm test                                      # 182 tests, no network
 npm run check                                 # TypeScript with no errors
 ```
 
