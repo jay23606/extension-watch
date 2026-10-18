@@ -315,6 +315,12 @@ button:focus-visible,
   border: 1px solid var(--border);
 }
 
+.status--warn {
+  color: #fde68a;
+  background: rgba(245, 184, 61, 0.12);
+  border: 1px solid rgba(245, 184, 61, 0.3);
+}
+
 /* ---------- pricing ---------- */
 .pricing {
   max-width: 980px;
@@ -718,6 +724,34 @@ button:focus-visible,
   color: var(--text-dim);
   font-size: 0.88rem;
   margin-top: 12px;
+}
+
+.watch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.watch-actions #policyTools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.watch-actions label {
+  color: var(--text-dim);
+  font-size: 0.86rem;
+}
+
+.policy-threshold {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
 }
 
 .watch-link {

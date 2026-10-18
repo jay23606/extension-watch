@@ -1,0 +1,183 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { assess } from "../src/risk";
+import { csvCell } from "../src/export";
+import type { Snapshot, Watchlist } from "../src/store";
+import type { Manifest } from "../src/types";
+
+const ADMIN = "K".repeat(43);
+const VIEWER = "V".repeat(43);
+const ID_A = "a".repeat(32);
+const ID_D = "d".repeat(32);
+const ID_F = "f".repeat(32);
+const ID_X = "x".repeat(32);
+
+function manifest(id: string, overrides: Partial<Manifest> = {}): Manifest {
+  return {
+    id,
+    name: "Test",
+    version: "1.0.0",
+    manifestVersion: 3,
+    permissions: [],
+    optionalPermissions: [],
+    hostPermissions: [],
+    contentScriptMatches: [],
+    externallyConnectable: [],
+    hasBackground: false,
+    csp: null,
+    updateUrl: null,
+    description: "",
+    ...overrides,
+  };
+}
+
+function snapshot(m: Manifest): Snapshot {
+  return { id: m.id, manifest: m, assessment: assess(m), error: null, checkedAt: "2026-10-18T00:00:00Z" };
+}
+
+function memKv() {
+  const store = new Map<string, { v: string; m?: unknown }>();
+  const kv = {
+    get: async (k: string) => store.get(k)?.v ?? null,
+    put: async (k: string, v: string, o?: { metadata?: unknown }) => { store.set(k, { v, m: o?.metadata }); },
+    delete: async (k: string) => { store.delete(k); },
+    list: async ({ prefix }: { prefix: string }) => ({ keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name, metadata: store.get(name)?.m })), list_complete: true }),
+  };
+  return { store, kv };
+}
+
+type PolicyEntry = { installation_mode: string; blocked_permissions?: string[]; runtime_blocked_hosts?: string[] };
+type Policy = { ExtensionSettings: Record<string, PolicyEntry> };
+
+// Scheme, then ://, then an optional wildcard label and a host. No path and no port.
+const HOST_PATTERN = /^(?:https?|\*):\/\/(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+const seedList = async () => {
+  const { store, kv } = memKv();
+  const a = snapshot(manifest(ID_A, { name: 'Calc, "Pro"', version: "1.0.0" }));
+  const d = snapshot(manifest(ID_D, { name: "Dash", version: "2.0.0", permissions: ["debugger", "cookies", "management"] }));
+  const f = snapshot(manifest(ID_F, { name: "Fab", version: "3.0.0", permissions: ["debugger", "cookies", "management", "proxy", "privacy"] }));
+  const x: Snapshot = { id: ID_X, manifest: null, assessment: null, error: "Not on the Chrome Web Store", checkedAt: "2026-10-18T00:00:00Z" };
+  const wl: Watchlist = {
+    name: "Team",
+    ids: [ID_A, ID_D, ID_F, ID_X],
+    snapshots: { [ID_A]: a, [ID_D]: d, [ID_F]: f, [ID_X]: x },
+    changes: [{ kind: "permission_added", value: "debugger", severity: "high", id: ID_D, at: "2026-10-18T01:00:00Z" }],
+    createdAt: "2026-10-18T00:00:00Z",
+    lastCheck: "2026-10-18T00:00:00Z",
+    viewToken: VIEWER,
+  };
+  await kv.put(`wl:${ADMIN}`, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
+  await kv.put(`vw:${VIEWER}`, ADMIN);
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const mod = await import("../src/worker.js");
+  const get = (path: string) => mod.default.fetch(new Request("http://x" + path), env as never);
+  return { store, kv, wl, get };
+};
+
+test("CSV cells quote commas, quotes and newlines", () => {
+  assert.equal(csvCell("plain"), "plain");
+  assert.equal(csvCell("a,b"), '"a,b"');
+  assert.equal(csvCell('a"b'), '"a""b"');
+  assert.equal(csvCell("a\nb"), '"a\nb"');
+  assert.equal(csvCell(null), "");
+});
+
+test("inventory export is CSV with the agreed columns and correct escaping", async () => {
+  const { get } = await seedList();
+  const res = await get(`/api/watchlists/${ADMIN}/export.csv`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /^text\/csv/);
+  assert.match(res.headers.get("content-disposition") ?? "", /watchlist-inventory\.csv/);
+  const lines = (await res.text()).trimEnd().split("\r\n");
+  assert.equal(lines[0], "id,name,version,grade,score,top findings,last checked");
+  assert.equal(lines[1], `${ID_A},"Calc, ""Pro""",1.0.0,A,0,,2026-10-18T00:00:00Z`);
+  assert.equal(lines[2], `${ID_D},Dash,2.0.0,D,60,Debugger access; Cookies; Extension management,2026-10-18T00:00:00Z`);
+  assert.equal(lines[3], `${ID_F},Fab,3.0.0,F,87,Debugger access; Cookies; Extension management,2026-10-18T00:00:00Z`);
+  assert.ok(lines[4]!.startsWith(`${ID_X},`));
+  assert.equal(lines.length, 5);
+});
+
+test("change log export is CSV and names the extension", async () => {
+  const { get } = await seedList();
+  const res = await get(`/api/watchlists/${ADMIN}/changes.csv`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-disposition") ?? "", /watchlist-changes\.csv/);
+  const lines = (await res.text()).trimEnd().split("\r\n");
+  assert.equal(lines[0], "at,extension id,extension name,kind,value,severity");
+  assert.equal(lines[1], `2026-10-18T01:00:00Z,${ID_D},Dash,permission_added,debugger,high`);
+});
+
+test("policy JSON blocks grades at or below the threshold and includes the sensitive hosts", async () => {
+  const { get } = await seedList();
+  const res = await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+  const policy = await res.json() as Policy;
+  const all = policy.ExtensionSettings["*"]!;
+  assert.equal(all.installation_mode, "blocked");
+  assert.ok(all.blocked_permissions!.includes("debugger"));
+  assert.ok(all.runtime_blocked_hosts!.includes("*://*.okta.com"));
+  assert.ok(all.runtime_blocked_hosts!.includes("*://*.salesforce.com"));
+  assert.ok(all.runtime_blocked_hosts!.includes("*://*.aws.amazon.com"));
+  assert.equal(policy.ExtensionSettings[ID_A]!.installation_mode, "allowed");
+  assert.equal(policy.ExtensionSettings[ID_D]!.installation_mode, "blocked");
+  assert.equal(policy.ExtensionSettings[ID_F]!.installation_mode, "blocked");
+  assert.equal(policy.ExtensionSettings[ID_X]!.installation_mode, "blocked");
+});
+
+test("every runtime_blocked_hosts entry is a Chrome host pattern with no path or port", async () => {
+  const { get } = await seedList();
+  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json?threshold=D`)).json() as Policy;
+  const hosts = policy.ExtensionSettings["*"]!.runtime_blocked_hosts!;
+  assert.ok(hosts.length > 0);
+  assert.equal(new Set(hosts).size, hosts.length);
+  for (const host of hosts) {
+    assert.match(host, HOST_PATTERN, host);
+    assert.ok(!host.includes("/", host.indexOf("://") + 3), host);
+  }
+  assert.ok(!hosts.some((host) => host.includes("console.aws.amazon.com")));
+  for (const [id, entry] of Object.entries(policy.ExtensionSettings)) {
+    for (const host of entry.runtime_blocked_hosts ?? []) assert.match(host, HOST_PATTERN, `${id} ${host}`);
+  }
+});
+
+test("an allowed extension repeats the permission and host blocks from the star entry", async () => {
+  const { get } = await seedList();
+  const policy = await (await get(`/api/watchlists/${ADMIN}/policy.json`)).json() as Policy;
+  const all = policy.ExtensionSettings["*"]!;
+  const allowed = Object.entries(policy.ExtensionSettings).filter(([id, entry]) => id !== "*" && entry.installation_mode === "allowed");
+  assert.deepEqual(allowed.map(([id]) => id).sort(), [ID_A, ID_D].sort());
+  for (const [id, entry] of allowed) {
+    assert.deepEqual(entry.blocked_permissions, all.blocked_permissions, id);
+    assert.deepEqual(entry.runtime_blocked_hosts, all.runtime_blocked_hosts, id);
+  }
+  for (const [id, entry] of Object.entries(policy.ExtensionSettings)) {
+    if (id !== "*" && entry.installation_mode === "blocked") {
+      assert.deepEqual(Object.keys(entry), ["installation_mode"], id);
+    }
+  }
+});
+
+test("policy threshold defaults to F and rejects a value that is not a grade", async () => {
+  const { get } = await seedList();
+  const byDefault = await (await get(`/api/watchlists/${ADMIN}/policy.json`)).json() as { ExtensionSettings: Record<string, { installation_mode: string }> };
+  assert.equal(byDefault.ExtensionSettings[ID_D]!.installation_mode, "allowed");
+  assert.equal(byDefault.ExtensionSettings[ID_F]!.installation_mode, "blocked");
+  const bad = await get(`/api/watchlists/${ADMIN}/policy.json?threshold=Z`);
+  assert.equal(bad.status, 400);
+});
+
+test("a read-only link may download CSV but never the policy", async () => {
+  const { get } = await seedList();
+  assert.equal((await get(`/api/watchlists/${VIEWER}/export.csv`)).status, 200);
+  assert.equal((await get(`/api/watchlists/${VIEWER}/changes.csv`)).status, 200);
+  assert.equal((await get(`/api/watchlists/${VIEWER}/policy.json?threshold=D`)).status, 403);
+});
+
+test("an unknown watchlist token gets 404 for every export", async () => {
+  const { get } = await seedList();
+  for (const file of ["export.csv", "changes.csv", "policy.json"]) {
+    assert.equal((await get(`/api/watchlists/${"Q".repeat(43)}/${file}`)).status, 404, file);
+  }
+});

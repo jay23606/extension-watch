@@ -15,6 +15,8 @@ Every company runs dozens of browser extensions that nobody reviewed. Extensions
 3. It grades each extension's access from A (little) to F (a lot) with a published rule set, and lists every finding with its points.
 4. "Watch this list" saves an admin link and a read-only link. Every day it reads every extension again (a list larger than one run's download budget finishes over the next runs, and stays due until every extension got an answer) and records each change. A change can be a permission or site access added, content scripts that reach new sites, a looser script policy, updates moved off the Web Store, a jump in the access score, a new version, or an extension pulled from the store.
 5. Add a Slack, Discord or Google Chat webhook (or any public https endpoint that takes JSON) and changes of medium severity or higher arrive as one message after each check.
+6. Export the list as CSV, or download a Chrome ExtensionSettings policy from the admin link. The policy blocks grades at or below a threshold you choose, blocks the debugger permission, and blocks runtime access to sensitive domains such as mail, single sign-on, password, banking, CRM and cloud consoles. Host patterns carry no path, and each allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry.
+7. The start page has a sample team list button with eight real popular extensions. The page warns when the 50 extension cap drops IDs or when most IDs are not found in the store.
 
 The grade measures access, not intent. A password manager needs to read every page, so it grades high (Bitwarden C 46, 1Password F 97 when checked on 18 October 2026), and that is fine when you trust its publisher. What matters is knowing it, and being told when an extension you trusted asks for more.
 
@@ -33,7 +35,7 @@ A watchlist shows the private link (blurred here), the change log, the extension
 ```
 Browser ── /api/scan ──────────► Cloudflare Worker ──► Google update service (CRX package, streamed)
         ── /api/watchlists ───►        │  find manifest + locale, grade, diff
-        ◄── /w/<private link> ──       ├─► Workers KV: one record per watchlist + one shared record per extension per day
+        ◄── /w/<private link> ──       ├─► Workers KV, one record per watchlist + one shared record per extension per day
 Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, oldest first ──► webhook alerts
 ```
 
@@ -65,6 +67,9 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | `DELETE /api/watchlists/<admin token>` | Delete a watchlist and its read-only link |
 | `POST /api/test-alert` `{ token: <admin token> }` | Send a labelled test message to the saved webhook |
 | `GET /api/rules` | The full points table |
+| `GET /api/watchlists/<token>/export.csv` | Inventory as CSV, for the admin and read-only links |
+| `GET /api/watchlists/<token>/changes.csv` | Change log as CSV, for the admin and read-only links |
+| `GET /api/watchlists/<admin token>/policy.json?threshold=D` | Chrome ExtensionSettings policy, admin link only |
 
 ## Methodology
 
@@ -83,6 +88,10 @@ The full points table is public at `/api/rules` and on the Methodology page. Som
 
 Rules that describe the same power are grouped, and a group counts once at its highest value. For example, broad host access, content scripts on all sites and script injection all mean "can run code on every site", so together they count 30, not 58. The grade bands are 0 to 19 A, 20 to 39 B, 40 to 59 C, 60 to 79 D, 80 and above F. Optional permissions are listed as "can request later" with 0 points, because the browser does not grant them at install. Every rule is deterministic. The same manifest always gives the same grade, and no model is involved.
 
+Chrome shows an install warning for several permissions that now carry points. They include webNavigation, topSites, bookmarks, identity.email, contentSettings, browsingData, pageCapture, sessions, tabCapture, desktopCapture, downloads, management, privacy, proxy, geolocation, clipboardRead, nativeMessaging and declarativeNetRequestFeedback. An update that adds webNavigation, topSites and identity.email reaches 30 points and raises an alert.
+
+Broad host access is decided with the ICANN public suffix list. "https://publicsuffix.org/list/public_suffix_list.dat" is downloaded and stored as a generated module, so `*://*.co.uk/*` and `*://*.com/*` grant every site, while `*://*.bit.ly/*`, `*://*.x.ai/*` and `*://*.t.co/*` grant one domain. Host permissions on mail, single sign-on, password, banking, CRM and cloud console sites add 15 points as Sensitive site access.
+
 Checked against 50 popular extensions in production on 17 October 2026 (UTC), with the shared cache cleared so only the deployed code ran. Of those, 46 were read (the other 4 are no longer in the store) and graded 9 A, 12 B, 16 C, 6 D and 3 F, with no `'wasm-unsafe-eval'` policy mistaken for `'unsafe-eval'`. The password managers came out as Bitwarden C 46, Keeper C 56, LastPass C 59, Dashlane D 71, RoboForm F 83, 1Password F 97.
 
 ## Privacy and security
@@ -92,6 +101,10 @@ Checked against 50 popular extensions in production on 17 October 2026 (UTC), wi
 - The Worker fetches only from Google (update service and Web Store page) and from the one webhook a list's admin sets. Extension IDs are validated (32 characters a to p) before any request. Webhooks must be https on the standard port with a host name. IP addresses, user names, and internal or loopback names such as `localhost`, `.internal` or `lvh.me` are refused, and redirects are not followed. Alerts always carry the read-only link, never the admin link, because chat channels are shared.
 - The API accepts only `application/json` (the MIME type is parsed, not substring-matched), so neither a form nor a simple cross-site request from another page can start work in a visitor's browser.
 - Pages are served with a strict Content Security Policy (no inline script, no eval), `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`. Text from manifests is rendered with `textContent`, never as HTML.
+
+## Exports
+
+The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold. In the Google Admin console open Apps, Additional Google services, Chrome Web Store, then ExtensionSettings and paste the JSON. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry, and a blocked extension needs only the blocked install mode.
 
 ## Pricing (planned, billing is not connected in this version)
 
@@ -109,7 +122,8 @@ The cost to serve a watchlist is at most one streamed download per extension per
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npx tsx --test test/*.test.ts                 # 118 tests, no network
+npm test                                      # 164 tests, no network
+npm run check                                 # TypeScript with no errors
 ```
 
 ## License

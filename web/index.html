@@ -37,6 +37,7 @@
               placeholder="aapbdbdomjkkjkaonfhkkikfgjllcleb&#10;https://chromewebstore.google.com/detail/google-translate/aapbdbdomjkkjkaonfhkkikfgjllcleb"></textarea>
             <div class="try__actions">
               <button type="submit" class="btn btn--primary">Scan extensions</button>
+              <button type="button" id="sampleButton" class="btn btn--ghost">Try a sample team list</button>
               <span class="try__note">Reads only public Web Store packages.</span>
             </div>
           </form>
@@ -142,6 +143,22 @@
         <p class="page-sub" id="watchMeta"></p>
         <p class="watch-link-line"><span id="watchLinkLabel">Read-only link to share: </span><a id="watchLink" class="watch-link" href="#" rel="noopener"></a></p>
         <p id="adminNote" class="page-note" hidden>You are on the admin link. Keep it private: it can change alerts and delete this list. Share the read-only link above instead.</p>
+        <p id="watchWarning" class="status status--warn" role="status" hidden></p>
+        <p id="watchExports" class="watch-actions">
+          <a id="exportCsv" class="btn btn--ghost btn--small" href="#" download>Download inventory CSV</a>
+          <a id="exportChanges" class="btn btn--ghost btn--small" href="#" download>Download change log CSV</a>
+          <span id="policyTools" hidden>
+            <label for="policyThreshold">Policy block threshold</label>
+            <select id="policyThreshold" class="policy-threshold">
+              <option value="F">F</option>
+              <option value="D" selected>D and lower</option>
+              <option value="C">C and lower</option>
+              <option value="B">B and lower</option>
+            </select>
+            <a id="exportPolicy" class="btn btn--ghost btn--small" href="#" download>Download Chrome policy JSON</a>
+          </span>
+        </p>
+        <p id="policyNote" class="page-note" hidden>To apply the policy, open the Google Admin console, go to Apps, Additional Google services, Chrome Web Store, then ExtensionSettings. Paste the downloaded JSON as the policy value and save.</p>
       </div>
 
       <section aria-labelledby="changes-heading">

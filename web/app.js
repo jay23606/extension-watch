@@ -6,6 +6,18 @@ const $$ = (selector, root) => Array.from((root || document).querySelectorAll(se
 const GRADE_COLOR = { A: "green", B: "teal", C: "amber", D: "orange", F: "red" };
 const SEVERITY_COLOR = { critical: "red", high: "orange", medium: "amber", low: "muted" };
 
+// Real, popular Web Store extensions, used by the sample button.
+const SAMPLE_IDS = [
+  "aapbdbdomjkkjkaonfhkkikfgjllcleb",
+  "cjpalhdlnbpafiamejdnhcphjbkeiagm",
+  "nngceckbapebfimnlniiiahkandclblb",
+  "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+  "kbfnbcaeplbcioakkpcpgfkobkghlhen",
+  "hdokiejnpimakedhajhdlcegeplioahd",
+  "fmkadmapgofadopljbjfkapdkoienihi",
+  "eimadpbcbfnmbkopoojfekhnkhdbieeh",
+];
+
 const CHANGE_LABEL = {
   permission_added: "Permission added",
   permission_removed: "Permission removed",
@@ -267,17 +279,17 @@ function renderResults(results, invalid = [], dropped = 0) {
   const ok = results.filter((r) => !r.error).length;
   const bad = results.length - ok;
   const skipped = invalid.length ? " Not extension IDs: " + invalid.slice(0, 5).join(", ") + (invalid.length > 5 ? " and " + (invalid.length - 5) + " more" : "") + "." : "";
-  const over = dropped > 0 ? " The first 25 were scanned; " + dropped + " more were left out." : "";
-  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped + over, "info");
+  const over = dropped > 0 ? " Only the first 25 were scanned; " + dropped + " more were left out." : "";
+  const missing = results.length > 0 && bad > ok ? " Most IDs were not on the Chrome Web Store. Check them and try again." : "";
+  setStatus($("#scanStatus"), "Scanned " + ok + " extension" + (ok === 1 ? "" : "s") + (bad ? ", " + bad + " could not be read" : "") + "." + skipped + over + missing, missing ? "error" : "info");
 }
 
 async function runScan(ids) {
-  const data = await apiJson("/api/scan", {
+  return apiJson("/api/scan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ids }),
   });
-  return extractResults(data);
 }
 
 async function createWatchlist(name, ids) {
@@ -358,6 +370,27 @@ function buildWatchExtensions(extensions) {
   return wrap;
 }
 
+function showWatchWarning(message) {
+  const node = $("#watchWarning");
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+function wireExports(token, admin) {
+  const base = "/api/watchlists/" + encodeURIComponent(token);
+  $("#exportCsv").href = base + "/export.csv";
+  $("#exportChanges").href = base + "/changes.csv";
+  $("#policyTools").hidden = !admin;
+  $("#policyNote").hidden = !admin;
+  const policy = $("#exportPolicy");
+  const threshold = $("#policyThreshold");
+  const update = () => {
+    policy.href = base + "/policy.json?threshold=" + encodeURIComponent(threshold.value);
+  };
+  threshold.onchange = update;
+  update();
+}
+
 function renderWatchlist(data, token) {
   $("#watchTitle").textContent = (data && data.name) || "Watchlist";
   $("#watchMeta").textContent = watchMetaText(data);
@@ -369,6 +402,8 @@ function renderWatchlist(data, token) {
   $("#watchLinkLabel").textContent = admin ? "Read-only link to share: " : "Read-only view: ";
   $("#adminNote").hidden = !admin;
   $("#alertSection").hidden = !admin;
+  $("#watchExports").hidden = false;
+  wireExports(token, admin);
   if (admin) wireAlerts(token, data && data.webhookSet ? data.webhook : null);
   let del = document.getElementById("watchDelete");
   if (!admin) {
@@ -390,8 +425,19 @@ function renderWatchlist(data, token) {
   const exts = $("#watchExtensions");
   // The API keys snapshots by extension ID; show them in the order the list was created.
   const snaps = (data && data.snapshots) || {};
-  const list = ((data && data.ids) || Object.keys(snaps)).map((id) => snaps[id]).filter(Boolean);
+  const ids = (data && data.ids) || Object.keys(snaps);
+  const list = ids.map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
+  let warning = "";
+  try {
+    warning = window.sessionStorage.getItem("ew-watch-warning") || "";
+    if (warning) window.sessionStorage.removeItem("ew-watch-warning");
+  } catch {
+    warning = "";
+  }
+  const missing = ids.filter((id) => snaps[id] && snaps[id].error === "Not on the Chrome Web Store").length;
+  if (!warning && ids.length > 0 && missing * 2 > ids.length) warning = "Most IDs in this list are not on the Chrome Web Store. Check them and try again.";
+  showWatchWarning(warning);
 }
 
 async function deleteWatchlist(token, button) {
@@ -519,6 +565,8 @@ function route() {
       $("#watchLink").textContent = "";
       $("#watchChanges").replaceChildren();
       $("#watchExtensions").replaceChildren();
+      showWatchWarning("");
+      $("#watchExports").hidden = true;
     });
 }
 
@@ -529,6 +577,15 @@ function wireNav() {
       showView(btn.getAttribute("data-nav"));
     });
   }
+}
+
+function wireSample() {
+  const button = $("#sampleButton");
+  button.addEventListener("click", () => {
+    $("#tryInput").value = SAMPLE_IDS.join("\n");
+    setStatus($("#tryStatus"), "Sample list ready. Scan it to see real grades.", "info");
+    $("#tryInput").focus();
+  });
 }
 
 function wireTryForm() {
@@ -543,10 +600,11 @@ function wireTryForm() {
     }
     setStatus(status, "Scanning " + ids.length + " extension" + (ids.length === 1 ? "" : "s") + "\u2026", "info");
     try {
-      const results = await runScan(ids);
+      const data = await runScan(ids);
+      const results = extractResults(data);
       lastIds = ids;
       const invalid = $("#tryInput").value.split(/[\s,;]+/).filter(Boolean).filter((part) => parseIds(part).length === 0);
-      renderResults(results, invalid, Math.max(0, ids.length - 25));
+      renderResults(results, invalid, Number(data && data.dropped) || 0);
       $("#watchForm").hidden = false;
       setStatus($("#watchStatus"), "", null);
       showView("workspace");
@@ -568,6 +626,13 @@ function wireWatchForm() {
       const data = await createWatchlist(name, lastIds);
       const token = data && data.token;
       if (!token) throw new Error("The service did not return a link.");
+      if (data && Number(data.dropped) > 0) {
+        try {
+          window.sessionStorage.setItem("ew-watch-warning", "The list holds 50 extensions. " + data.dropped + " more were left out.");
+        } catch {
+          // Storage can be unavailable in private modes; the list is still created.
+        }
+      }
       window.location.assign("/w/" + encodeURIComponent(token));
     } catch (err) {
       setStatus(status, err.message || "Could not create watchlist.", "error");
@@ -577,6 +642,7 @@ function wireWatchForm() {
 
 function init() {
   wireNav();
+  wireSample();
   wireTryForm();
   wireWatchForm();
   route();

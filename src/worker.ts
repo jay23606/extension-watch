@@ -2,6 +2,7 @@ import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
 import { allow, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, remove, resolveView, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { changesCsv, inventoryCsv, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
@@ -143,6 +144,31 @@ async function json<T>(request: Request): Promise<T> {
 
 const ipOf = (req: Request) => req.headers.get("cf-connecting-ip") ?? "local";
 
+function csvResponse(body: string, filename: string): Response {
+  return new Response(body, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"` } });
+}
+
+/** Exports accept the admin link and the read-only link. The policy is admin only. */
+async function exportResponse(req: Request, env: Env, rest: string): Promise<Response> {
+  const [token = "", file = ""] = rest.split("/");
+  const direct = await load(env.WATCHLISTS, token);
+  const adminToken = direct ? token : (await resolveView(env.WATCHLISTS, token)) ?? "";
+  const wl = direct ?? (adminToken ? await load(env.WATCHLISTS, adminToken) : null);
+  if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+  if (file === "export.csv") return csvResponse(inventoryCsv(wl), "watchlist-inventory.csv");
+  if (file === "changes.csv") return csvResponse(changesCsv(wl), "watchlist-changes.csv");
+  if (file === "policy.json") {
+    if (!direct) return Response.json({ error: "Only the admin link can export a policy." }, { status: 403 });
+    const query = new URL(req.url).searchParams;
+    const threshold = thresholdFrom(query.get("threshold") ?? query.get("grade"));
+    if (!threshold) throw new FetchError(400, "Use a grade threshold from A to F.");
+    return new Response(JSON.stringify(policyFor(wl, threshold), null, 2), {
+      headers: { "content-type": "application/json", "content-disposition": 'attachment; filename="chrome-extension-policy.json"' },
+    });
+  }
+  return Response.json({ error: "Not found." }, { status: 404 });
+}
+
 type Handler = (req: Request, env: Env, rest: string) => Promise<Response>;
 const routes: Record<string, Handler> = {
   "POST /api/scan": async (req, env) => {
@@ -164,7 +190,8 @@ const routes: Record<string, Handler> = {
     await save(env.WATCHLISTS, token, wl);
     return Response.json({ token, url: `/w/${token}`, dropped });
   },
-  "GET /api/watchlists": async (_req, env, rest) => {
+  "GET /api/watchlists": async (req, env, rest) => {
+    if (rest.includes("/")) return exportResponse(req, env, rest);
     let token = rest;
     let wl = await load(env.WATCHLISTS, token);
     const role = wl ? "admin" : "viewer";
@@ -242,7 +269,9 @@ async function route(request: Request, env: Env): Promise<Response> {
       return Response.json({ error: "Too many requests. Wait a minute and try again." }, { status: 429 });
     }
     if (url.pathname.startsWith("/w/")) return env.ASSETS.fetch(new Request(new URL("/", url), request));
-    const [, , a = "", rest = ""] = url.pathname.split("/");
+    const parts = url.pathname.split("/");
+    const a = parts[2] ?? "";
+    const rest = parts.slice(3).join("/");
     const handler = routes[`${request.method} /api/${a}`];
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
     if (!handler) return Response.json({ error: "Not found." }, { status: 404 });
