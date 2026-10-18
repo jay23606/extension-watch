@@ -197,3 +197,38 @@ test("notifications, readingList, tabGroups and tts score low", () => {
   }
   assert.equal(assess(manifest({ permissions: ["notifications", "readingList", "tabGroups", "tts"] })).score, 8);
 });
+
+test("a wildcard that covers a sensitive host is sensitive again", () => {
+  for (const pattern of ["*://*.google.com/*", "*://*.slack.com/*", "*://*.office.com/*", "*://*.microsoft.com/*"]) {
+    assert.equal(isSensitive(pattern), true, pattern);
+    const a = assess(manifest({ hostPermissions: [pattern] }));
+    assert.equal(a.score, 15, pattern);
+    assert.equal(a.grade, "A", pattern);
+    assert.equal(a.findings.length, 1, pattern);
+    assert.equal(a.findings[0]!.code, "sensitive_hosts", pattern);
+  }
+});
+
+test("a wildcard for a sensitive host alone no longer scores 0", () => {
+  const a = assess(manifest({ hostPermissions: ["*://*.google.com/*"] }));
+  assert.equal(a.score, 15);
+  assert.equal(a.grade, "A");
+  assert.equal(a.findings.filter((f) => f.code === "sensitive_hosts").length, 1);
+});
+
+test("all-sites access scores the all-sites rule once and the sensitive rule adds 0", () => {
+  for (const broad of ["<all_urls>", "*://*/*"]) {
+    const a = assess(manifest({ hostPermissions: [broad] }));
+    assert.equal(a.score, 30, broad);
+    assert.equal(a.grade, "B", broad);
+    const sensitive = a.findings.filter((f) => f.code === "sensitive_hosts");
+    assert.equal(sensitive.length, 1, broad);
+    assert.equal(sensitive[0]!.points, 0, broad);
+  }
+});
+
+test("a bare parent wildcard stays out even when the manifest also has broad access", () => {
+  const a = assess(manifest({ hostPermissions: ["*://*.amazon.com/*"] }));
+  assert.equal(a.score, 0);
+  assert.equal(a.findings.length, 0);
+});

@@ -59,10 +59,12 @@ test("Google Translate manifest scores 30, grade B (capability group max)", () =
   const a = assess(GOOGLE_TRANSLATE);
   assert.equal(a.score, 30);
   assert.equal(a.grade, "B");
-  assert.equal(a.findings.length, 2);
+  assert.equal(a.findings.length, 3);
   assert.equal(a.findings[0]!.code, "broad_hosts");
   assert.equal(a.findings[1]!.code, "scripting");
   assert.equal(a.findings[1]!.points, 25);
+  assert.equal(a.findings[2]!.code, "sensitive_hosts");
+  assert.equal(a.findings[2]!.points, 0);
   assert.equal(a.summary, "Highest access is Broad host access and Script injection.");
 });
 
@@ -251,7 +253,7 @@ test("score is capped at 100 with grade F", () => {
   );
   assert.equal(a.score, 100);
   assert.equal(a.grade, "F");
-  assert.equal(a.findings.length, 22);
+  assert.equal(a.findings.length, 23);
 });
 
 test("summary names the single top finding", () => {

@@ -55,10 +55,12 @@ test("the export tools offer both policy modes and a preview", () => {
   assert.match(app, /&mode=/);
 });
 
-test("default deny is described as blocking every extension not on the list", () => {
+test("both policy modes are described with what each one blocks", () => {
   assert.match(app, /blocks every extension that is not on this list/);
-  assert.match(app, /Extensions that are not on the list are not blocked/);
+  assert.match(app, /leaves extensions that are not on the list installable/);
+  assert.match(app, /kept off the debugger permission and off the sensitive sites/);
   assert.match(html, /Default deny blocks every extension that is not on the list/);
+  assert.match(html, /keep every extension off the debugger permission and off the sensitive sites/);
 });
 
 test("the deployment note names the console, Group Policy, plist and Linux routes", () => {

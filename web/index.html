@@ -164,7 +164,7 @@
           </span>
         </p>
         <p id="policyPreview" class="page-note" hidden></p>
-        <p id="policyModes" class="page-note" hidden>Threshold mode blocks only the listed extensions graded at or below the threshold. Default deny blocks every extension that is not on the list.</p>
+        <p id="policyModes" class="page-note" hidden>Threshold mode leaves extensions that are not on the list installable and blocks only the listed extensions graded at or below the threshold. Default deny blocks every extension that is not on the list. Both modes keep every extension off the debugger permission and off the sensitive sites.</p>
         <p id="policyNote" class="page-note" hidden>To apply the policy, open the Google Admin console, go to Chrome browser, then Custom Configurations under Chrome Enterprise Core. Paste the downloaded JSON as the ExtensionSettings policy value. On Windows, deploy the same JSON through the Chrome Group Policy templates. On macOS, add it to the com.google.Chrome configuration profile plist. On Linux, write it to a file under /etc/opt/chrome/policies/managed/.</p>
       </div>
 

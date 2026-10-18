@@ -391,9 +391,9 @@ function policyPreviewText(data, mode, threshold) {
     : "none";
   const count = blocked.length + " listed extension" + (blocked.length === 1 ? "" : "s");
   if (mode === "default-deny") {
-    return "Default deny blocks every extension that is not on this list, and also blocks the " + count + " at or below grade " + threshold + ". Those are " + list + ".";
+    return "Default deny blocks every extension that is not on this list, and also blocks the " + count + " at or below grade " + threshold + ". Those are " + list + ". Every extension, listed or not, is kept off the debugger permission and off the sensitive sites.";
   }
-  return "Threshold blocks only the " + count + " at or below grade " + threshold + ". Those are " + list + ". Extensions that are not on the list are not blocked.";
+  return "Threshold leaves extensions that are not on the list installable and blocks only the " + count + " at or below grade " + threshold + ". Those are " + list + ". Every extension, listed or not, is kept off the debugger permission and off the sensitive sites.";
 }
 
 function wireExports(token, admin, data) {

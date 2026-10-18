@@ -61,19 +61,17 @@ export function modeFrom(raw: string | null): PolicyMode | null {
   return mode === "threshold" || mode === "default-deny" ? mode : null;
 }
 
-/** Password managers and single sign-on tools that must keep their own sign-in domains at runtime. */
-const RUNTIME_TOOLS: readonly { match: RegExp; vendor: string[]; signIn: string[] }[] = [
-  { match: /bitwarden/i, vendor: ["bitwarden.com"], signIn: ["vault.bitwarden.com"] },
-  { match: /1password/i, vendor: ["1password.com"], signIn: ["my.1password.com", "start.1password.com"] },
-  { match: /lastpass/i, vendor: ["lastpass.com"], signIn: ["lastpass.com"] },
-  { match: /dashlane/i, vendor: ["dashlane.com"], signIn: ["www.dashlane.com"] },
-  { match: /keepersecurity|keeper security/i, vendor: ["keepersecurity.com", "keepersecurity.eu"], signIn: ["keepersecurity.com"] },
-  { match: /nordpass/i, vendor: ["nordpass.com"], signIn: ["nordpass.com"] },
-  { match: /okta/i, vendor: ["okta.com"], signIn: ["okta.com"] },
-  { match: /onelogin/i, vendor: ["onelogin.com"], signIn: ["onelogin.com"] },
-  { match: /jumpcloud/i, vendor: ["jumpcloud.com"], signIn: ["jumpcloud.com"] },
-  { match: /pingidentity|ping identity/i, vendor: ["pingidentity.com"], signIn: ["pingidentity.com"] },
-  { match: /auth0/i, vendor: ["auth0.com"], signIn: ["auth0.com"] },
+/**
+ * Password managers and single sign-on tools that must keep their own sign-in domains at runtime. Each
+ * one is matched by extension id from a fixed list, never by the publisher-controlled name.
+ */
+const RUNTIME_TOOLS: readonly { ids: readonly string[]; vendor: readonly string[]; signIn: readonly string[] }[] = [
+  { ids: ["nngceckbapebfimnlniiiahkandclblb"], vendor: ["bitwarden.com"], signIn: ["vault.bitwarden.com"] },
+  { ids: ["aeblfdkhhhdcdjpifhhbdiojplfjncoa"], vendor: ["1password.com"], signIn: ["my.1password.com", "start.1password.com"] },
+  { ids: ["hdokiejnpimakedhajhdlcegeplioahd"], vendor: ["lastpass.com"], signIn: ["lastpass.com"] },
+  { ids: ["fdjamakpfbbddfjaooikfcpapjohcfmg"], vendor: ["dashlane.com"], signIn: ["www.dashlane.com"] },
+  { ids: ["bfogiafebfohielmmehodmfbbebbbpei"], vendor: ["keepersecurity.com", "keepersecurity.eu"], signIn: ["keepersecurity.com"] },
+  { ids: ["glnpjglilkicbckjpbgcfkogebgllemb"], vendor: ["okta.com"], signIn: ["okta.com"] },
 ];
 
 /**
@@ -89,18 +87,20 @@ export function runtimeBlockedHosts(): string[] {
     .map((host) => `*://*.${host}`);
 }
 
-function toolFor(name: string | null | undefined): { vendor: string[]; signIn: string[] } | null {
-  if (!name) return null;
-  return RUNTIME_TOOLS.find((tool) => tool.match.test(name)) ?? null;
+function toolFor(id: string | null | undefined): { vendor: readonly string[]; signIn: readonly string[] } | null {
+  if (!id) return null;
+  const key = id.trim().toLowerCase();
+  return RUNTIME_TOOLS.find((tool) => tool.ids.includes(key)) ?? null;
 }
 
 /**
  * An allowed extension repeats the permission and host blocks from the catch-all entry, because Chrome
- * does not inherit them. A password manager or sign-on tool keeps its own vendor domains, and gets the
- * sign-in domains it needs as runtime_allowed_hosts, which the ExtensionSettings format accepts.
+ * does not inherit them. A password manager or sign-on tool, found by its extension id, keeps its own
+ * vendor domains, and gets the sign-in domains it needs as runtime_allowed_hosts, which the
+ * ExtensionSettings format accepts.
  */
-function allowedEntry(name: string | null | undefined): Record<string, unknown> {
-  const tool = toolFor(name);
+function allowedEntry(id: string): Record<string, unknown> {
+  const tool = toolFor(id);
   const blocked = runtimeBlockedHosts().filter((pattern) => !(tool?.vendor ?? []).some((domain) => pattern === `*://*.${domain}`));
   const entry: Record<string, unknown> = {
     installation_mode: "allowed",
@@ -115,11 +115,11 @@ function allowedEntry(name: string | null | undefined): Record<string, unknown> 
 export function policyFor(wl: Watchlist, threshold: string, mode: PolicyMode = "threshold"): { ExtensionSettings: Record<string, unknown> } {
   const blockedRank = GRADE_RANK[threshold] ?? GRADE_RANK.F!;
   const settings: Record<string, unknown> = {
-    // Default deny blocks every extension that is not on the list. Threshold mode leaves the wildcard
-    // unblocked, so only the listed extensions are touched.
+    // Default deny blocks every extension that is not on the list. Threshold mode keeps the catch-all
+    // installable but still keeps every extension off the debugger permission and off sensitive sites.
     "*": mode === "default-deny"
       ? { installation_mode: "blocked", blocked_permissions: [...BLOCKED_PERMISSIONS], runtime_blocked_hosts: runtimeBlockedHosts() }
-      : { blocked_permissions: [...BLOCKED_PERMISSIONS] },
+      : { blocked_permissions: [...BLOCKED_PERMISSIONS], runtime_blocked_hosts: runtimeBlockedHosts() },
   };
   for (const id of wl.ids) {
     const snap = wl.snapshots[id];
@@ -128,7 +128,7 @@ export function policyFor(wl: Watchlist, threshold: string, mode: PolicyMode = "
     // Default deny blocks anything that was not reviewed. Threshold mode blocks only what was graded at
     // or below the threshold, and allows the rest of the list.
     const allowed = mode === "default-deny" ? rank !== null && rank < blockedRank : rank === null || rank < blockedRank;
-    settings[id] = allowed ? allowedEntry(snap?.manifest?.name) : { installation_mode: "blocked" };
+    settings[id] = allowed ? allowedEntry(id) : { installation_mode: "blocked" };
   }
   return { ExtensionSettings: settings };
 }

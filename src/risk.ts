@@ -142,16 +142,29 @@ function hostOf(pattern: string): string | null {
   return host || null;
 }
 
+/** True when a listed host has a proper subdomain in the list, so it is only an umbrella for a deeper host. */
+function hasListedSubdomain(host: string): boolean {
+  return SENSITIVE_DOMAINS.some((other) => other !== host && other.endsWith(`.${host}`));
+}
+
 /**
- * True when a pattern targets a listed sensitive host or one of its subdomains. A pattern for a bare
- * parent such as *.amazon.com is not sensitive, because only the listed hosts and their subdomains count.
+ * True when a pattern targets a listed sensitive host or one of its subdomains, or when a wildcard covers
+ * them. A wildcard counts only for a direct child that is not itself an umbrella, so *.google.com is
+ * sensitive (it covers mail.google.com) while a bare parent such as *.amazon.com is not (its only child,
+ * aws.amazon.com, is an umbrella for console.aws.amazon.com).
  */
 export function isSensitive(pattern: string): boolean {
   const raw = hostOf(pattern);
   if (!raw) return false;
-  const host = raw.startsWith("*.") ? raw.slice(2) : raw;
+  const wildcard = raw.startsWith("*.");
+  const host = wildcard ? raw.slice(2) : raw;
   if (!host.includes(".")) return false;
-  return SENSITIVE_DOMAINS.some((d) => host === d || (!EXACT_ONLY_HOSTS.has(d) && host.endsWith(`.${d}`)));
+  return SENSITIVE_DOMAINS.some((d) => {
+    if (host === d) return true;
+    if (EXACT_ONLY_HOSTS.has(d)) return false;
+    if (host.endsWith(`.${d}`)) return true;
+    return wildcard && d.endsWith(`.${host}`) && d.split(".").length === host.split(".").length + 1 && !hasListedSubdomain(d);
+  });
 }
 
 /** Chrome ignores the path of a host permission, so any scheme with a bare path grants every site. */
@@ -227,9 +240,15 @@ export function assess(m: Manifest): Assessment {
   };
 
   if (broad) items.push(rule("broad_hosts"));
-  if (m.hostPermissions.some(isSensitive)) items.push(rule("sensitive_hosts"));
-  if (m.contentScriptMatches.some(isSensitive)) {
-    items.push({ ...rule("sensitive_hosts"), title: "Sensitive site access (content script)", detail: "Content scripts reach a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." });
+  if (broad) {
+    // A broad host permission already reaches every site, so it covers the sensitive sites too. Keep the
+    // label but score 0 there, so the all-sites rule is not double counted.
+    items.push(rule("sensitive_hosts", 0));
+  } else {
+    if (m.hostPermissions.some(isSensitive)) items.push(rule("sensitive_hosts"));
+    if (m.contentScriptMatches.some(isSensitive)) {
+      items.push({ ...rule("sensitive_hosts"), title: "Sensitive site access (content script)", detail: "Content scripts reach a mail, single sign-on, password, banking, CRM, collaboration or cloud console site." });
+    }
   }
   if (m.permissions.includes("debugger")) items.push(rule("debugger"));
   if (m.permissions.includes("nativeMessaging")) items.push(rule("native_messaging"));

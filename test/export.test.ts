@@ -225,7 +225,7 @@ test("modeFrom defaults to threshold and rejects an unknown mode", () => {
   assert.equal(modeFrom("nope"), null);
 });
 
-test("threshold mode leaves the wildcard unblocked and only touches listed extensions", async () => {
+test("threshold mode keeps the catch-all installable and still blocks the debugger and sensitive hosts", async () => {
   const { get } = await seedList();
   const res = await get(`/api/watchlists/${ADMIN}/policy.json`);
   assert.equal(res.status, 200);
@@ -233,7 +233,8 @@ test("threshold mode leaves the wildcard unblocked and only touches listed exten
   const all = policy.ExtensionSettings["*"]!;
   assert.equal(all.installation_mode, undefined);
   assert.deepEqual(all.blocked_permissions, ["debugger"]);
-  assert.equal(all.runtime_blocked_hosts, undefined);
+  assert.ok(all.runtime_blocked_hosts!.includes("*://*.okta.com"));
+  assert.ok(all.runtime_blocked_hosts!.includes("*://*.aws.amazon.com"));
   // Default threshold is F, so only the F extension is blocked. D and A are allowed, the unreadable X is allowed.
   assert.equal(policy.ExtensionSettings[ID_A]!.installation_mode, "allowed");
   assert.equal(policy.ExtensionSettings[ID_D]!.installation_mode, "allowed");
@@ -251,8 +252,8 @@ test("threshold mode allows only at or below the threshold and rejects an unknow
 });
 
 test("an allowed password manager keeps its vendor domain and gets its sign-in hosts", () => {
-  const bitwarden = snapshot(manifest("b".repeat(32), { name: "Bitwarden Password Manager" }));
-  const onepassword = snapshot(manifest("c".repeat(32), { name: "1Password" }));
+  const bitwarden = snapshot(manifest("nngceckbapebfimnlniiiahkandclblb", { name: "Bitwarden Password Manager" }));
+  const onepassword = snapshot(manifest("aeblfdkhhhdcdjpifhhbdiojplfjncoa", { name: "1Password" }));
   const wl: Watchlist = {
     name: "Team",
     ids: [bitwarden.id, onepassword.id],
@@ -273,4 +274,21 @@ test("an allowed password manager keeps its vendor domain and gets its sign-in h
   assert.deepEqual(op.runtime_allowed_hosts, ["*://*.my.1password.com", "*://*.start.1password.com"]);
   // The rest of the sensitive hosts still stand.
   assert.ok(bw.runtime_blocked_hosts!.includes("*://*.okta.com"));
+});
+
+test("a tool exception matches the extension id, never the publisher-controlled name", () => {
+  const impostor = snapshot(manifest("b".repeat(32), { name: "Bitwarden Password Manager" }));
+  const wl: Watchlist = {
+    name: "Team",
+    ids: [impostor.id],
+    snapshots: { [impostor.id]: impostor },
+    changes: [],
+    createdAt: "2026-10-18T00:00:00Z",
+    lastCheck: "2026-10-18T00:00:00Z",
+  };
+  const policy = policyFor(wl, "D", "default-deny");
+  const entry = policy.ExtensionSettings[impostor.id] as PolicyEntry;
+  assert.equal(entry.installation_mode, "allowed");
+  assert.equal(entry.runtime_allowed_hosts, undefined);
+  assert.ok(entry.runtime_blocked_hosts!.includes("*://*.bitwarden.com"));
 });
