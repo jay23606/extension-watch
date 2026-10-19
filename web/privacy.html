@@ -26,13 +26,14 @@
       <div class="card">
         <h2 class="section-title">What we store</h2>
         <p class="page-note">Extension Watch keeps one record for each watchlist in Workers KV, the key value store that Cloudflare provides. The record holds the watchlist name you choose, the extension IDs on the list, one snapshot for each extension (the manifest the browser would run, the access grade and the time it was checked), the change log, the full webhook URL, and a short audit log of admin actions. There is no account and no email.</p>
+        <p class="page-note">When a new list starts, the service writes one trial marker for the client address, so a single address can start at most 3 Team trials inside a 30 day window. The marker key holds a SHA-256 hash of the address, never the address itself, and the marker record is deleted after 30 days.</p>
         <p class="page-note">The full webhook URL is stored so alerts can be sent. The pages and API responses show it masked, as its host name only, so the secret path in the URL never appears on screen or in a shared view. Alerts contain the watchlist name and public extension data. Extension packages are read from Google and are never stored. Rules check host names with the ICANN public suffix list, which is compiled into the service instead of being fetched at run time.</p>
         <p class="page-note">The audit log records admin actions on a list, such as created, webhook set or removed, test alert sent, policy exported, a CSV download, rotate, rename and delete, with the time and the action only. Each entry is stored under its own key, so two admins acting at the same time both keep their entry. Tokens and webhook URLs are never written to it. It keeps the newest 100 entries, and the change log keeps the newest 200 entries.</p>
       </div>
 
       <div class="card">
         <h2 class="section-title">How long we keep it</h2>
-        <p class="page-note">A watchlist record expires 90 days after the last save. A list that nobody opens for 90 days stops being checked, so it is not saved again and then expires. A list with a webhook stays checked for up to 365 days of silence, because that team reads the alerts. The read-only link that points to a list is kept for 400 days. A snapshot of an individual extension is shared between every list that watches it and expires after 3 days. Daily counters for scans, new watchlists and test alerts expire after 2 days.</p>
+        <p class="page-note">A watchlist record expires 90 days after the last save. A list that nobody opens for 90 days stops being checked, so it is not saved again and then expires. A list with a webhook stays checked for up to 365 days of silence, because that team reads the alerts. The read-only link that points to a list is kept for 400 days. A snapshot of an individual extension is shared between every list that watches it and expires after 3 days. Daily counters for scans, new watchlists and test alerts expire after 2 days, and a trial marker for a client address expires after 30 days.</p>
       </div>
 
       <div class="card">

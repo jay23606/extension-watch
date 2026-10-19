@@ -54,6 +54,7 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 | `vw:<read-only token>` | The admin token it belongs to | 400 days |
 | `ext:<extension id>` | The day's snapshot of one extension, shared by every watchlist | 3 days |
 | `rl:<action>:<day>:<address>` | Daily counter for scans, new watchlists and test alerts | 2 days |
+| `tri:<sha256 of client address>` | Trial marker holding the time the address claimed its one Team trial, so a second new list from the same address inside 30 days starts on Free. The key holds a SHA-256 hash of the address, never the address itself | 30 days |
 
 A change is `{ kind, value, severity, id, at }`. The change log keeps the last 200 entries.
 
@@ -62,7 +63,7 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | Method and path | Purpose |
 |---|---|
 | `POST /api/scan` `{ ids }` | Grade up to 25 extensions |
-| `POST /api/watchlists` `{ name, ids }` | Create a watchlist (up to 50 extensions) and get back the private token |
+| `POST /api/watchlists` `{ name, ids, plan? }` | Create a watchlist (up to 50 extensions) and get back the private token. `plan` is optional and only `free` is meaningful, which starts the list on Free and skips the Team trial |
 | `GET /api/watchlists/<token>` | Read a watchlist. The admin token returns `role: admin`, the read-only token and the webhook host. The read-only token returns `role: viewer` and no webhook |
 | `PUT /api/watchlists/<admin token>` `{ webhook }` | Set or clear the alert webhook |
 | `PUT /api/watchlists/<admin token>` `{ name }` | Rename a watchlist |
@@ -102,7 +103,7 @@ The first production check ran on 18 October 2026 with the shared cache cleared 
 
 ## Privacy and security
 
-- Each watchlist stores a name you choose, extension IDs, manifest snapshots and the change log. There's no email, no user account and no employee data.
+- Each watchlist stores a name you choose, extension IDs, manifest snapshots and the change log. There's no email, no user account and no employee data. To give one address only one Team trial, the service also stores a trial marker keyed by a SHA-256 hash of the client address, never the address itself, and that marker expires after 30 days.
 - Each watchlist has two links, each 32 random bytes (base64url). The admin link can change alerts and delete the list. The read-only link, the one the page tells you to share, can only view it. The service has no list of watchlists that anyone can browse. A list nobody opens for 90 days (365 days when it has a webhook, because that team reads it in chat) stops being checked and then expires. The full webhook URL is stored so alerts can be sent, and the pages and API responses show it masked, as its host name only, because a chat webhook lets anyone who has it post to the channel.
 - The Worker fetches only from Google (update service and Web Store page) and from the one webhook a list's admin sets. Extension IDs are validated (32 characters a to p) before any request. Webhooks must be https on the standard port with a host name. IP addresses, user names, and internal or loopback names such as `localhost`, `.internal` or `lvh.me` are refused, and redirects are not followed. Alerts always carry the read-only link, never the admin link, because chat channels are shared.
 - The API accepts only `application/json` (the MIME type is parsed, not substring-matched), so neither a form nor a simple cross-site request from another page can start work in a visitor's browser.
@@ -122,9 +123,9 @@ The watchlist page has download buttons for the inventory CSV and the change log
 
 ## Plans (billing is not connected in this version)
 
-Every list starts on a 14 day Team trial, so a first visitor sees every feature at once. Free keeps the risk report and up to 25 extension ids per list, and Team removes that id limit and adds the CSV exports, the policy export and the audit log.
+Every list starts on a 14 day Team trial, so a first visitor sees every feature at once. Three trials are allowed per client address inside a 30 day window, counted in Workers KV under a key that holds only a SHA-256 hash of the address, never the address itself, and that marker expires 30 days after the first trial. A fourth new list from the same address inside the window starts on Free, and the creation response and the watchlist page both say why. Free keeps the risk report and up to 25 extension ids per list, and Team raises the limit to 50 and adds the CSV exports, the policy export and the audit log.
 
-Billing is not live yet, and upgrades to Team are granted by the operator with a secret code, so this is a plan and gating model in code, not a paid product. After the trial a Free list answers HTTP 402 with a plain message on the CSV, policy and audit routes, and the watchlist page shows a usage badge with the plan, the ids used of the limit and the trial days left. A list saved before plans existed has no plan field and counts as Team, so nothing saved earlier breaks. A Free list that held more than 25 ids on the trial keeps them, but the daily check covers its first 25.
+Billing is not live yet, and upgrades to Team are granted by the operator with a secret code, so this is a plan and gating model in code, not a paid product. The operator sets a Worker secret named `OPERATOR_CODE` with `npx wrangler secret put OPERATOR_CODE`. If it is unset the plan route answers 403 for every caller and no list can move to Team. The route is `PUT /api/watchlists/<admin token>/plan`, and the operator code travels in the `x-operator-code` header, so a plan change needs both the operator code and the admin token of the list. The list owner sends the operator their admin link, and the operator takes the token from it and calls the route. The read-only link cannot change a plan. After the trial a Free list answers HTTP 402 with a plain message on the CSV, policy and audit routes, and the watchlist page shows a usage badge with the plan, the number of ids checked of the limit and the trial days left, plus a note when more ids are stored than Free checks. A list saved before plans existed has no plan field and counts as Team, so nothing saved earlier breaks. A Free list that held more than 25 ids on the trial keeps them, but the daily check covers its first 25.
 
 | Plan | Price | Ids per list | Included |
 |---|---|---|---|
@@ -154,8 +155,9 @@ Billing is not live yet, and upgrades to Team are granted by the operator with a
 ```bash
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
+npx wrangler secret put OPERATOR_CODE         # the code the operator uses to move a list to Team
 npx wrangler dev
-npm test                                      # 225 tests, no network
+npm test                                      # 230 tests, no network
 npm run check                                 # TypeScript with no errors
 npm run economics                             # measured KV and subrequest counts for a day of checks
 ```

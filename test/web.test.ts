@@ -55,6 +55,19 @@ test("the export tools offer both policy modes and a preview", () => {
   assert.match(app, /&mode=/);
 });
 
+test("the policy preview and every export button get their hidden state on every render", () => {
+  assert.match(app, /preview\.hidden = !admin \|\| free/);
+  assert.match(app, /\$\("#exportCsv"\)\.hidden = free/);
+  assert.match(app, /\$\("#exportChanges"\)\.hidden = free/);
+  assert.match(app, /\$\("#exportAudit"\)\.hidden = !admin \|\| free/);
+  assert.match(app, /\$\("#policyTools"\)\.hidden = !admin \|\| free/);
+});
+
+test("the Free badge prints the checked ids clamped and notes extra stored ids", () => {
+  assert.match(app, /Math\.min\(usage\.ids, limit\)/);
+  assert.match(app, /more are stored but only the first/);
+});
+
 test("both policy modes are described with what each one blocks", () => {
   assert.match(app, /blocks every extension that is not on this list/);
   assert.match(app, /leaves extensions that are not on the list installable/);

@@ -322,7 +322,12 @@ function watchMetaText(data) {
 function usageBadgeText(usage) {
   if (!usage) return "";
   if (usage.plan === "team" && usage.trialDaysLeft > 0) return "Team trial, " + usage.trialDaysLeft + " day" + (usage.trialDaysLeft === 1 ? "" : "s") + " left";
-  if (usage.plan === "free") return "Free plan, " + usage.ids + " of " + (usage.limit || 25) + " extensions";
+  if (usage.plan === "free") {
+    const limit = usage.limit || 25;
+    const checked = Math.min(usage.ids, limit);
+    const extra = usage.ids > limit ? " " + (usage.ids - limit) + " more are stored but only the first " + limit + " are checked." : "";
+    return "Free plan, " + checked + " of " + limit + " extensions." + extra;
+  }
   return "Team plan";
 }
 
@@ -448,16 +453,13 @@ function wireExports(token, admin, data) {
   $("#exportCsv").href = base + "/export.csv";
   $("#exportChanges").href = base + "/changes.csv";
   $("#exportAudit").href = base + "/audit.csv";
-  $("#exportAudit").hidden = !admin;
-  $("#policyTools").hidden = !admin;
   // A Free list past its trial keeps the risk report but not the Team exports, which the API answers with 402.
   const free = Boolean(data && data.usage && data.usage.plan === "free");
-  if (free) {
-    $("#exportCsv").hidden = true;
-    $("#exportChanges").hidden = true;
-    $("#exportAudit").hidden = true;
-    $("#policyTools").hidden = true;
-  }
+  // Set every export button on every render, so an in page move between two lists cannot leave one hidden.
+  $("#exportCsv").hidden = free;
+  $("#exportChanges").hidden = free;
+  $("#exportAudit").hidden = !admin || free;
+  $("#policyTools").hidden = !admin || free;
   $("#policyNote").hidden = !admin || free;
   $("#policyModes").hidden = !admin || free;
   const policy = $("#exportPolicy");
@@ -467,7 +469,7 @@ function wireExports(token, admin, data) {
   const update = () => {
     policy.href = base + "/policy.json?threshold=" + encodeURIComponent(threshold.value) + "&mode=" + encodeURIComponent(mode.value);
     preview.textContent = policyPreviewText(data, mode.value, threshold.value);
-    preview.hidden = !admin;
+    preview.hidden = !admin || free;
   };
   mode.onchange = update;
   threshold.onchange = update;
@@ -740,9 +742,14 @@ function wireWatchForm() {
       const data = await createWatchlist(name, lastIds);
       const token = data && data.token;
       if (!token) throw new Error("The service did not return a link.");
-      if (data && Number(data.dropped) > 0) {
+      const notice = data && data.note
+        ? String(data.note)
+        : data && Number(data.dropped) > 0
+          ? "The list holds 50 extensions. " + data.dropped + " more were left out."
+          : "";
+      if (notice) {
         try {
-          window.sessionStorage.setItem("ew-watch-warning", "The list holds 50 extensions. " + data.dropped + " more were left out.");
+          window.sessionStorage.setItem("ew-watch-warning", notice);
         } catch {
           // Storage can be unavailable in private modes; the list is still created.
         }

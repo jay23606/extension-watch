@@ -21,10 +21,10 @@ const snap = (m: Manifest | null, error: string | null = null): Snapshot => ({ i
 const list = (): Watchlist => ({ name: "t", ids: [idAt(0)], snapshots: {}, changes: [], createdAt: "2026-01-01T00:00:00Z", lastCheck: "2026-01-01T00:00:00Z" });
 
 function memKv() {
-  const store = new Map<string, { v: string; m?: unknown }>();
+  const store = new Map<string, { v: string; m?: unknown; ttl?: number }>();
   const kv = {
     get: async (k: string) => store.get(k)?.v ?? null,
-    put: async (k: string, v: string, o?: { metadata?: unknown }) => { store.set(k, { v, m: o?.metadata }); },
+    put: async (k: string, v: string, o?: { expirationTtl?: number; metadata?: unknown }) => { store.set(k, { v, m: o?.metadata, ttl: o?.expirationTtl }); },
     delete: async (k: string) => { store.delete(k); },
     list: async ({ prefix }: { prefix: string }) => ({ keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name, metadata: store.get(name)?.m })), list_complete: true }),
   };
@@ -169,4 +169,67 @@ test("a Free list that held more ids on the trial is checked for 25 of them", ()
   assert.equal(idsToCheck(free).length, 25);
   const team: Watchlist = { ...list(), ids, plan: "team" };
   assert.equal(idsToCheck(team).length, 30);
+});
+
+const crxOk = async (): Promise<Response> => {
+  const { manifestCrxForTest } = await import("./helpers.js");
+  const body = manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "1", permissions: ["storage"] }) as unknown as BodyInit;
+  return new Response(body, { status: 200 });
+};
+
+test("three trials per address, a fourth new list inside the window starts Free with a plain note", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => crxOk()) as typeof fetch;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const create = async (name: string, i: number) =>
+    await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name, ids: [idAt(i)] }), env as never)).json() as { token: string; plan: string; note?: string };
+  try {
+    for (let i = 0; i < 3; i++) {
+      const list = await create("T" + i, i);
+      assert.equal(list.plan, "trial", "list " + (i + 1) + " gets the trial");
+      assert.equal(list.note, undefined, "no note while trials remain");
+    }
+    const fourth = await create("D", 3);
+    assert.equal(fourth.plan, "free", "a fourth list from the same address starts Free");
+    assert.match(fourth.note ?? "", /trial/i, "the response carries a plain note about the trial");
+    assert.ok(!(fourth.note ?? "").includes(":"), "the note has no colon");
+    const data = await (await mod.default.fetch(jsonReq("http://x/api/watchlists/" + fourth.token, "GET"), env as never)).json() as { usage: { plan: string } };
+    assert.equal(data.usage.plan, "free", "the fourth list is on Free");
+  } finally { globalThis.fetch = real; }
+});
+
+test("the trial marker stores a SHA-256 hash of the address with a 30 day TTL", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => crxOk()) as typeof fetch;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  try {
+    await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "A", ids: [idAt(0)] }), env as never);
+  } finally { globalThis.fetch = real; }
+  const marker = [...store.keys()].find((k) => k.startsWith("tri:"));
+  assert.ok(marker, "a trial marker is written");
+  assert.ok(!marker!.includes("7.7.7.7"), "the raw address is never stored in the key");
+  assert.match(marker!.slice(4), /^[0-9a-f]{64}$/, "the key holds a hex SHA-256 of the address");
+  assert.equal(store.get(marker!)?.ttl, 30 * 86400, "the marker expires in 30 days");
+});
+
+test("an explicit Free list does not consume the trial, and an expired marker grants a new one", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => crxOk()) as typeof fetch;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  try {
+    const free = await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "F", ids: [idAt(0)], plan: "free" }), env as never)).json() as { plan: string };
+    assert.equal(free.plan, "free");
+    assert.equal([...store.keys()].some((k) => k.startsWith("tri:")), false, "asking for Free does not spend the trial");
+    const trial = await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "T", ids: [idAt(1)] }), env as never)).json() as { plan: string };
+    assert.equal(trial.plan, "trial", "the trial is still available");
+    for (const key of [...store.keys()]) if (key.startsWith("tri:")) store.delete(key);
+    const again = await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "T2", ids: [idAt(2)] }), env as never)).json() as { plan: string };
+    assert.equal(again.plan, "trial", "after the marker expires a new trial is granted");
+  } finally { globalThis.fetch = real; }
 });

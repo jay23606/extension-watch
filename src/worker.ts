@@ -1,7 +1,7 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
+import { allow, appendAudit, cachedSnapshot, cacheSnapshot, claimTrial, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
@@ -21,12 +21,23 @@ const KV_BUDGET = 800;
 const POSTPONED = "Check postponed to the next run.";
 /** A Free list keeps the risk report but not the Team exports. Billing is not live yet, so upgrades are by hand. */
 const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the admin to upgrade this list.";
+/** Shown when one address tries a second new list inside the trial window. */
+const TRIAL_USED_MESSAGE = "This address already started 3 trials in the last 30 days, so this new list starts on the Free plan.";
 
-/** Constant time comparison for the operator code. */
-function sameSecret(given: string, expected: string): boolean {
-  if (given.length !== expected.length) return false;
+/**
+ * Compare the operator code through fixed length SHA-256 digests of both strings, so the
+ * comparison takes the same time for every input and never leaks the length of the secret.
+ */
+async function sameSecret(given: string, expected: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(given)),
+    crypto.subtle.digest("SHA-256", enc.encode(expected)),
+  ]);
+  const av = new Uint8Array(a);
+  const bv = new Uint8Array(b);
   let diff = 0;
-  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i);
+  for (let i = 0; i < av.length; i++) diff |= av[i]! ^ bv[i]!;
   return diff === 0;
 }
 
@@ -222,17 +233,23 @@ const routes: Record<string, Handler> = {
     if (rest) return Response.json({ error: "Not found." }, { status: 404 });
     if (!(await allow(env.WATCHLISTS, ipOf(req), "watch", 20, today()))) throw new FetchError(429, "Daily watchlist limit reached for this address.");
     const body = await json<{ name?: unknown; ids?: unknown; plan?: unknown }>(req);
-    // A new list starts on the Team trial unless the caller asks for Free directly. Team is granted by the admin route.
-    const plan: Plan = String(body.plan ?? "").trim().toLowerCase() === "free" ? "free" : "trial";
-    const { ids, dropped } = parseIds(body.ids, plan === "free" ? FREE_MAX_IDS : MAX_IDS);
-    if (ids.length === 0) throw new FetchError(400, "Add at least one extension.");
+    // A new list starts on the Team trial unless the caller asks for Free directly, or this address
+    // already used its one trial inside the window. Team is granted later by the operator route.
+    const wantsFree = String(body.plan ?? "").trim().toLowerCase() === "free";
+    const allIds = parseIds(body.ids, MAX_IDS).ids;
+    if (allIds.length === 0) throw new FetchError(400, "Add at least one extension.");
+    const trialUsed = wantsFree ? false : !(await claimTrial(env.WATCHLISTS, ipOf(req)));
+    const startPlan: Plan = wantsFree || trialUsed ? "free" : "trial";
+    const limit = startPlan === "free" ? FREE_MAX_IDS : MAX_IDS;
+    const ids = allIds.slice(0, limit);
+    const dropped = Math.max(0, allIds.length - limit);
     const token = newToken(); const now = new Date().toISOString();
-    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now, plan, trialEndsAt: plan === "trial" ? trialEndFrom() : undefined };
+    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now, plan: startPlan, trialEndsAt: startPlan === "trial" ? trialEndFrom() : undefined };
     apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS, kv: 4 * MAX_IDS })), true); // baseline: no "new" noise
     await ensureViewToken(env.WATCHLISTS, token, wl);
     await save(env.WATCHLISTS, token, wl);
     await appendAudit(env.WATCHLISTS, token, "created");
-    return Response.json({ token, url: `/w/${token}`, dropped });
+    return Response.json({ token, url: `/w/${token}`, dropped, plan: startPlan, note: trialUsed ? TRIAL_USED_MESSAGE : undefined });
   },
   "GET /api/watchlists": async (req, env, rest) => {
     if (rest.includes("/")) return exportResponse(req, env, rest);
@@ -267,7 +284,7 @@ const routes: Record<string, Handler> = {
       const token = rest.slice(0, -"/plan".length);
       const wl = await load(env.WATCHLISTS, token);
       if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
-      if (!env.OPERATOR_CODE || !sameSecret(req.headers.get("x-operator-code") ?? "", env.OPERATOR_CODE)) {
+      if (!env.OPERATOR_CODE || !(await sameSecret(req.headers.get("x-operator-code") ?? "", env.OPERATOR_CODE))) {
         return Response.json({ error: "Plans are changed by the operator while billing is not live." }, { status: 403 });
       }
       const value = (await json<{ plan?: unknown }>(req)).plan;

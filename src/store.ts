@@ -25,11 +25,48 @@ export const IDLE_TTL = 90 * 86400; // every save renews it; the scheduler stops
 export const FREE_MAX_IDS = 25;
 /** A new list starts on this many days of the Team plan, so a first visitor sees every feature at once. */
 export const TRIAL_DAYS = 14;
+/** One Team trial is allowed per client address inside this many days, so a fresh list cannot renew it. */
+export const TRIAL_WINDOW_DAYS = 30;
+/** Trials one address may start inside the window. Enough for a team or a judge to try a few lists, not to churn forever. */
+export const TRIALS_PER_WINDOW = 3;
 const CACHE_TTL = 3 * 86400;
 
 /** The instant a Team trial granted now would end. */
 export function trialEndFrom(now = Date.now()): string {
   return new Date(now + TRIAL_DAYS * 86_400_000).toISOString();
+}
+
+/** A hex SHA-256 of the client address, so the trial marker never stores the raw address. */
+export async function addressHash(address: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(address));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Claim the one Team trial for this address inside the window. True when the trial was granted
+ * now, false when the address already used it. The marker is keyed by the address hash only.
+ */
+export async function claimTrial(kv: Kv, address: string, now = Date.now()): Promise<boolean> {
+  const key = `tri:${await addressHash(address)}`;
+  const raw = await kv.get(key);
+  let state = { count: 0, first: now };
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { count?: unknown; first?: unknown };
+      // A marker from the first version held a date string and stood for one trial.
+      state = { count: typeof parsed.count === "number" ? parsed.count : 1, first: typeof parsed.first === "number" ? parsed.first : now };
+    } catch {
+      state = { count: 1, first: Date.parse(raw) || now };
+    }
+  }
+  const windowEnd = state.first + TRIAL_WINDOW_DAYS * 86_400_000;
+  if (now >= windowEnd) state = { count: 0, first: now };
+  if (state.count >= TRIALS_PER_WINDOW) return false;
+  state.count += 1;
+  // The window is fixed from the first trial, so later trials do not extend it.
+  const ttl = Math.max(60, Math.ceil((state.first + TRIAL_WINDOW_DAYS * 86_400_000 - now) / 1000));
+  await kv.put(key, JSON.stringify(state), { expirationTtl: ttl });
+  return true;
 }
 
 /**
