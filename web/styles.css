@@ -88,8 +88,9 @@ button {
   padding: 20px 16px 72px;
 }
 
-.view[hidden] {
-  display: none;
+.view[hidden],
+[hidden] {
+  display: none !important;
 }
 
 /* ---------- header ---------- */
