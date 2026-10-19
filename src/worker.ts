@@ -1,13 +1,13 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
+import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
 interface RateLimit { limit(o: { key: string }): Promise<{ success: boolean }> }
-interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv; WRITE_LIMIT?: RateLimit }
+interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv; WRITE_LIMIT?: RateLimit; OPERATOR_CODE?: string }
 
 const MAX_SCAN = 25;
 const NOT_LISTED = "Not on the Chrome Web Store";
@@ -21,6 +21,14 @@ const KV_BUDGET = 800;
 const POSTPONED = "Check postponed to the next run.";
 /** A Free list keeps the risk report but not the Team exports. Billing is not live yet, so upgrades are by hand. */
 const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the admin to upgrade this list.";
+
+/** Constant time comparison for the operator code. */
+function sameSecret(given: string, expected: string): boolean {
+  if (given.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
 
 function freePlanResponse(): Response {
   return Response.json({ error: FREE_PLAN_MESSAGE }, { status: 402 });
@@ -126,7 +134,7 @@ async function recheck(kv: Kv, token: string, get: (id: string) => Promise<Snaps
   const idleLimit = (wl.webhook ? 365 * 86400 : IDLE_TTL) * 1000;
   if (Date.now() - Date.parse(wl.viewedAt ?? wl.createdAt) > idleLimit) return;
   const seen = wl.changes.length;
-  apply(wl, await scanMany(wl.ids, get), false);
+  apply(wl, await scanMany(idsToCheck(wl), get), false);
   // Take the new changes before save() trims the log to its last 200 entries.
   const fresh = alertable(wl.changes.slice(seen));
   if (fresh.length) {
@@ -254,12 +262,16 @@ const routes: Record<string, Handler> = {
     return Response.json({ deleted: true });
   },
   "PUT /api/watchlists": async (req, env, rest) => {
-    // Admin link only: set the plan by hand while billing is not live.
+    // Operator only: billing is not live, so a plan changes only with the operator code on top of the admin link.
     if (rest.endsWith("/plan")) {
       const token = rest.slice(0, -"/plan".length);
       const wl = await load(env.WATCHLISTS, token);
       if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
-      const raw = String((await json<{ plan?: unknown }>(req)).plan ?? "").trim().toLowerCase();
+      if (!env.OPERATOR_CODE || !sameSecret(req.headers.get("x-operator-code") ?? "", env.OPERATOR_CODE)) {
+        return Response.json({ error: "Plans are changed by the operator while billing is not live." }, { status: 403 });
+      }
+      const value = (await json<{ plan?: unknown }>(req)).plan;
+      const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
       if (raw !== "free" && raw !== "team") throw new FetchError(400, "Use a plan of free or team.");
       const plan = raw as Plan;
       if (plan !== wl.plan) await appendAudit(env.WATCHLISTS, token, "plan set to " + plan);

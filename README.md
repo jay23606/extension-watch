@@ -67,7 +67,7 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | `PUT /api/watchlists/<admin token>` `{ webhook }` | Set or clear the alert webhook |
 | `PUT /api/watchlists/<admin token>` `{ name }` | Rename a watchlist |
 | `DELETE /api/watchlists/<admin token>` | Delete a watchlist and its read-only link |
-| `PUT /api/watchlists/<admin token>/plan` `{ plan }` | Set the plan to free or team. Admin link only, and it is how a Team upgrade is granted by hand while billing is not live |
+| `PUT /api/watchlists/<admin token>/plan` `{ plan }` | Set the plan to free or team. Needs the admin link and the operator code in an `x-operator-code` header, so a list owner cannot upgrade their own list while billing is not live |
 | `POST /api/watchlists/<admin token>/rotate` | Issue a new admin token and a new read-only token, move the list to the new key, delete the old keys and return the new links. Admin link only, and both old links return 404 afterwards |
 | `POST /api/test-alert` `{ token: <admin token> }` | Send a labelled test message to the saved webhook |
 | `GET /api/rules` | The full points table |
@@ -124,7 +124,7 @@ The watchlist page has download buttons for the inventory CSV and the change log
 
 Every list starts on a 14 day Team trial, so a first visitor sees every feature at once. Free keeps the risk report and up to 25 extension ids per list, and Team removes that id limit and adds the CSV exports, the policy export and the audit log.
 
-Billing is not live yet, and upgrades to Team are granted by hand, so this is a plan and gating model in code, not a paid product. After the trial a Free list answers HTTP 402 with a plain message on the CSV, policy and audit routes, and the watchlist page shows a usage badge with the plan, the ids used of the limit and the trial days left. A list saved before plans existed has no plan field and counts as Team, so nothing saved earlier breaks.
+Billing is not live yet, and upgrades to Team are granted by the operator with a secret code, so this is a plan and gating model in code, not a paid product. After the trial a Free list answers HTTP 402 with a plain message on the CSV, policy and audit routes, and the watchlist page shows a usage badge with the plan, the ids used of the limit and the trial days left. A list saved before plans existed has no plan field and counts as Team, so nothing saved earlier breaks. A Free list that held more than 25 ids on the trial keeps them, but the daily check covers its first 25.
 
 | Plan | Price | Ids per list | Included |
 |---|---|---|---|
@@ -155,7 +155,7 @@ Billing is not live yet, and upgrades to Team are granted by hand, so this is a 
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npm test                                      # 223 tests, no network
+npm test                                      # 225 tests, no network
 npm run check                                 # TypeScript with no errors
 npm run economics                             # measured KV and subrequest counts for a day of checks
 ```

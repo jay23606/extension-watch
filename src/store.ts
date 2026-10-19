@@ -54,6 +54,11 @@ export function trialDaysLeft(wl: Watchlist, now = Date.now()): number {
 /** What the usage badge shows: the plan in force, the ids used and the free limit, and trial days left. */
 export interface PlanUsage { plan: "free" | "team"; ids: number; limit: number | null; trialDaysLeft: number }
 
+/** The ids a scheduled check covers. A Free list is checked for its first 25 ids only, even if it held more on the trial. */
+export function idsToCheck(wl: Watchlist, now = Date.now()): string[] {
+  return effectivePlan(wl, now) === "free" ? wl.ids.slice(0, FREE_MAX_IDS) : wl.ids;
+}
+
 export function planUsage(wl: Watchlist, now = Date.now()): PlanUsage {
   const plan = effectivePlan(wl, now);
   return { plan, ids: wl.ids.length, limit: plan === "free" ? FREE_MAX_IDS : null, trialDaysLeft: trialDaysLeft(wl, now) };

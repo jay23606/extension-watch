@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applySnapshots } from "../src/worker.js";
-import { effectivePlan, trialDaysLeft, type Snapshot, type Watchlist } from "../src/store.js";
+import { effectivePlan, idsToCheck, trialDaysLeft, type Snapshot, type Watchlist } from "../src/store.js";
 import type { Manifest } from "../src/types.js";
 
 const ADMIN = "M".repeat(43);
@@ -34,6 +34,8 @@ function memKv() {
 const jsonReq = (url: string, method: string, body?: unknown, ct = "application/json") =>
   new Request(url, { method, headers: { "content-type": ct, "cf-connecting-ip": "7.7.7.7" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
+const OPERATOR = "operator-code-for-tests-0123456789";
+
 async function seed(over: Partial<Watchlist> = {}) {
   const { store, kv } = memKv();
   const base = list();
@@ -42,9 +44,12 @@ async function seed(over: Partial<Watchlist> = {}) {
   await kv.put("wl:" + ADMIN, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
   await kv.put("vw:" + VIEWER, ADMIN);
   const mod = await import("../src/worker.js");
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
-  const call = (path: string, method = "GET", body?: unknown, ct = "application/json") =>
-    mod.default.fetch(jsonReq("http://x" + path, method, body, ct), env as never);
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, OPERATOR_CODE: OPERATOR };
+  const call = (path: string, method = "GET", body?: unknown, ct = "application/json", headers: Record<string, string> = {}) => {
+    const req = jsonReq("http://x" + path, method, body, ct);
+    for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
+    return mod.default.fetch(req, env as never);
+  };
   return { store, kv, wl, call, env, mod };
 }
 
@@ -121,7 +126,7 @@ test("a legacy list with no plan field counts as Team and keeps every export", a
 
 test("the admin link can set a list to Team by hand and the export opens up", async () => {
   const { call } = await seed({ plan: "free" });
-  const res = await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "team" });
+  const res = await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "team" }, "application/json", { "x-operator-code": OPERATOR });
   assert.equal(res.status, 200);
   const body = await res.json() as { plan: string; usage: { plan: string; limit: number | null } };
   assert.equal(body.plan, "team");
@@ -143,7 +148,25 @@ test("an expired trial falls back to Free with no id plan limit change", () => {
 
 test("the plan route is admin only and rejects a plan that is not free or team", async () => {
   const { call } = await seed();
-  assert.equal((await call("/api/watchlists/" + VIEWER + "/plan", "PUT", { plan: "team" })).status, 404, "the read-only link cannot change a plan");
-  assert.equal((await call("/api/watchlists/" + "Z".repeat(43) + "/plan", "PUT", { plan: "team" })).status, 404);
-  assert.equal((await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "pro" })).status, 400);
+  const op = { "x-operator-code": OPERATOR };
+  assert.equal((await call("/api/watchlists/" + VIEWER + "/plan", "PUT", { plan: "team" }, "application/json", op)).status, 404, "the read-only link cannot change a plan");
+  assert.equal((await call("/api/watchlists/" + "Z".repeat(43) + "/plan", "PUT", { plan: "team" }, "application/json", op)).status, 404);
+  assert.equal((await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "pro" }, "application/json", op)).status, 400);
+  assert.equal((await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: ["team"] }, "application/json", op)).status, 400, "a plan that is not text is refused");
+});
+
+test("the admin link alone cannot upgrade its own list", async () => {
+  const { call } = await seed({ plan: "free" });
+  assert.equal((await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "team" })).status, 403);
+  assert.equal((await call("/api/watchlists/" + ADMIN + "/plan", "PUT", { plan: "team" }, "application/json", { "x-operator-code": "wrong" })).status, 403);
+  const data = await (await call("/api/watchlists/" + ADMIN, "GET")).json() as { usage: { plan: string } };
+  assert.equal(data.usage.plan, "free");
+});
+
+test("a Free list that held more ids on the trial is checked for 25 of them", () => {
+  const ids = Array.from({ length: 30 }, (_, i) => String.fromCharCode(97 + (i % 16)).repeat(31) + String.fromCharCode(97 + (i % 16)));
+  const free: Watchlist = { ...list(), ids, plan: "free" };
+  assert.equal(idsToCheck(free).length, 25);
+  const team: Watchlist = { ...list(), ids, plan: "team" };
+  assert.equal(idsToCheck(team).length, 30);
 });
