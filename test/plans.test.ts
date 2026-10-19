@@ -104,6 +104,7 @@ test("a Free list gets 402 on the CSV, policy and audit exports", async () => {
     assert.match(body.error, /Free plan/, file);
     assert.match(body.error, /github\.com\/theluckystrike/, "the operator address is in the 402 body");
     assert.match(body.error, /https:\/\/github\.com\/theluckystrike\/extension-watch\/issues/, "the issues link is in the 402 body");
+    assert.match(body.error, /Never post your admin link in a public issue\./, "the 402 body warns about posting the admin link");
     assert.ok(!body.error.replace(/https?:\/\/\S+/g, "").includes(":"), "the message has no colon outside a URL");
   }
 });
@@ -269,16 +270,48 @@ test("IPv6 addresses hash by their /64 prefix, compressed and full forms agree, 
   }
 });
 
-test("five simultaneous trial claims for one address grant at most three", async () => {
+test("five simultaneous trial claims for one address grant exactly three", async () => {
   const store = await import("../src/store.js");
   store.setAddressSalt(TEST_SALT);
   const { kv, store: raw } = memKv();
   try {
     const results = await Promise.all(Array.from({ length: 5 }, () => store.claimTrial(kv, "198.51.100.9")));
     const granted = results.filter(Boolean).length;
-    assert.ok(granted <= 3, "at most 3 claims succeed, got " + granted);
+    assert.equal(granted, 3, "exactly 3 claims succeed, got " + granted);
     const markers = [...raw.keys()].filter((k) => k.startsWith("tri:"));
     assert.equal(markers.length, granted, "a refused claim removes its own marker");
+  } finally {
+    store.setAddressSalt(undefined);
+  }
+});
+
+test("an old-format trial record counts as its stored attempts and the next claim is the last one", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt(TEST_SALT);
+  const { kv, store: raw } = memKv();
+  try {
+    const hash = await store.addressHash("198.51.100.10");
+    const first = Date.now() - 2 * 86_400_000;
+    await kv.put("tri:" + hash, JSON.stringify({ count: 2, first }));
+    assert.equal(await store.claimTrial(kv, "198.51.100.10"), true, "the third attempt inside the window is granted");
+    assert.equal(await store.claimTrial(kv, "198.51.100.10"), false, "a fourth attempt is refused");
+    assert.equal([...raw.keys()].filter((k) => k.startsWith("tri:")).length, 2, "the old counter key and the one granted marker remain");
+  } finally {
+    store.setAddressSalt(undefined);
+  }
+});
+
+test("an old-format trial record that is a plain date string still counts as one attempt", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt(TEST_SALT);
+  const { kv, store: raw } = memKv();
+  try {
+    const hash = await store.addressHash("198.51.100.11");
+    await kv.put("tri:" + hash, new Date(Date.now() - 86_400_000).toISOString());
+    assert.equal(await store.claimTrial(kv, "198.51.100.11"), true);
+    assert.equal(await store.claimTrial(kv, "198.51.100.11"), true);
+    assert.equal(await store.claimTrial(kv, "198.51.100.11"), false, "the old record counts, so only two more fit");
+    assert.equal([...raw.keys()].filter((k) => k.startsWith("tri:")).length, 3);
   } finally {
     store.setAddressSalt(undefined);
   }

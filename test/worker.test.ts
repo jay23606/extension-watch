@@ -272,3 +272,71 @@ test("P7: a webhook removed while a check runs stays removed", async () => {
   try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; }
   assert.equal(JSON.parse(store.get("wl:" + token)!.v).webhook, null);
 });
+
+test("a check reads the tombstone once more right before it saves", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const token = "T".repeat(43);
+  const { put } = seeded(token, { lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() });
+  await put(kv);
+  const seen: string[] = [];
+  const realGet = kv.get;
+  kv.get = async (k: string) => { seen.push(k); return realGet(k); };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 204 })) as typeof fetch;
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; kv.get = realGet; }
+  assert.equal(seen.filter((k) => k === "del:" + token).length, 3, "the check, then save reads the tombstone before and after its write");
+  assert.ok(seen.indexOf("del:" + token) > seen.indexOf("wl:" + token), "the check reads the tombstone after it re-loads the list");
+});
+
+test("a rotate during a check cannot bring the retired admin link back", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "R".repeat(43);
+  const { put } = seeded(token, { lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() });
+  await put(kv);
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
+  const stale = store.get("wl:" + token)!.v;
+  let serveStale = false;
+  const realGet = kv.get;
+  kv.get = async (k: string) => {
+    if (serveStale && k === "wl:" + token) { serveStale = false; return stale; } // a lagging read in the running check
+    return realGet(k);
+  };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const res = await mod.default.fetch(jsonReq("http://x/api/watchlists/" + token + "/rotate", "POST"), env as never);
+    assert.equal(res.status, 200);
+    serveStale = true;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try { await mod.default.scheduled({}, env as never); } finally { globalThis.fetch = real; kv.get = realGet; }
+  assert.equal(store.has("wl:" + token), false, "the check does not save the retired admin record back");
+  assert.ok(store.has("del:" + token), "the rotate left a tombstone");
+});
+
+test("a delete during a check cannot bring the deleted link back", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv, store } = memKv();
+  const token = "S".repeat(43);
+  const { put } = seeded(token, { lastCheck: "2026-01-01T00:00:00Z", viewedAt: new Date().toISOString() });
+  await put(kv);
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
+  const stale = store.get("wl:" + token)!.v;
+  let serveStale = false;
+  const realGet = kv.get;
+  kv.get = async (k: string) => {
+    if (serveStale && k === "wl:" + token) { serveStale = false; return stale; } // a lagging read in the running check
+    return realGet(k);
+  };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const res = await mod.default.fetch(jsonReq("http://x/api/watchlists/" + token, "DELETE"), env as never);
+    assert.equal(res.status, 200);
+    serveStale = true;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try { await mod.default.scheduled({}, env as never); } finally { globalThis.fetch = real; kv.get = realGet; }
+  assert.equal(store.has("wl:" + token), false, "the check does not save the deleted record back");
+  assert.ok(store.has("del:" + token), "the delete left a tombstone");
+});

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+const privacy = readFileSync(new URL("../web/privacy.html", import.meta.url), "utf8");
 
 test("the sample button fills the form with 8 real extension IDs", () => {
   assert.match(html, /id="sampleButton"/);
@@ -61,6 +62,11 @@ test("the policy preview and every export button get their hidden state on every
   assert.match(app, /\$\("#exportChanges"\)\.hidden = free/);
   assert.match(app, /\$\("#exportAudit"\)\.hidden = !admin \|\| free/);
   assert.match(app, /\$\("#policyTools"\)\.hidden = !admin \|\| free/);
+});
+
+test("the plan badge and the privacy page warn against posting the admin link in a public issue", () => {
+  assert.match(html, /Never post your admin link in a public issue\./);
+  assert.match(privacy, /Never post your admin link in a public issue\./);
 });
 
 test("the Free badge prints the checked ids clamped and notes extra stored ids", () => {

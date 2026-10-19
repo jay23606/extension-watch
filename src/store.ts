@@ -129,8 +129,8 @@ async function trialMarkers(kv: Kv, hash: string): Promise<TrialMarker[]> {
 /**
  * Claim one Team trial for this address inside the window. Workers KV has no compare and set, so
  * each attempt writes its own unique marker, then reads the markers back and refuses when its
- * place in the order is past the cap. Concurrent attempts in one location keep the cap. KV reads
- * can lag behind writes in another location, so the cap is best effort across locations.
+ * place in the order is past the cap. The cap holds for claims that see each other's markers and is
+ * best effort across locations, because KV is eventually consistent.
  */
 export async function claimTrial(kv: Kv, address: string, now = Date.now()): Promise<boolean> {
   const hash = await addressHash(address);
@@ -296,6 +296,8 @@ export async function rotate(kv: Kv, token: string): Promise<{ token: string; vi
   // The audit keys carry the list token, so move them to the new prefix, then record the rotation.
   await moveAudit(kv, token, newAdmin);
   await appendAudit(kv, newAdmin, "rotate");
+  // Retire the old admin token the same way delete does, so a check that loaded the old record cannot save it back.
+  await kv.put(TOMBSTONE_PREFIX + token, JSON.stringify({ deletedAt: new Date().toISOString() }), { expirationTtl: TOMBSTONE_TTL });
   await kv.delete(`wl:${token}`);
   if (oldView) await kv.delete(`vw:${oldView}`);
   return { token: newAdmin, viewToken: newView };

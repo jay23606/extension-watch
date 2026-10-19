@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { applySnapshots } from "../src/worker.js";
-import { appendAudit, logAudit, MAX_AUDIT, readAudit, save, type Snapshot, type Watchlist } from "../src/store.js";
+import { appendAudit, load, logAudit, MAX_AUDIT, readAudit, save, type Snapshot, type Watchlist } from "../src/store.js";
 import type { Manifest } from "../src/types.js";
 
 const ID_A = "a".repeat(32);
@@ -229,6 +229,32 @@ test("a deleted list writes a tombstone so a stale save cannot recreate it", asy
   assert.equal(await save(kv, ADMIN, wl), false, "a save after the delete is refused");
   assert.equal(store.has("wl:" + ADMIN), false, "the old record is not put back");
   assert.equal((await call("/api/watchlists/" + ADMIN, "GET")).status, 404, "the deleted link stays gone");
+});
+
+test("a check that loaded the list before a delete cannot save it back", async () => {
+  const { store, kv, wl, call } = await seed();
+  const stale = await load(kv, ADMIN);
+  assert.ok(stale, "the check loaded the list before the delete");
+  assert.equal((await call("/api/watchlists/" + ADMIN, "DELETE")).status, 200);
+  stale!.name = "Stale rename";
+  stale!.changes.push({ kind: "version_changed", value: "1 to 2", severity: "low", id: ID_A, at: new Date().toISOString() });
+  assert.equal(await save(kv, ADMIN, stale!), false, "the stale save is refused");
+  assert.equal(store.has("wl:" + ADMIN), false, "the deleted record is not recreated");
+  assert.equal((await call("/api/watchlists/" + ADMIN, "GET")).status, 404, "the old admin link stays gone");
+});
+
+test("a check that loaded the list before a rotate cannot save the old admin link back", async () => {
+  const { store, kv, call } = await seed();
+  const stale = await load(kv, ADMIN);
+  assert.ok(stale, "the check loaded the old record");
+  const res = await call("/api/watchlists/" + ADMIN + "/rotate", "POST");
+  assert.equal(res.status, 200);
+  const { token } = await res.json() as { token: string };
+  assert.ok(store.has("del:" + ADMIN), "rotate writes the same tombstone delete writes");
+  assert.equal(await save(kv, ADMIN, stale!), false, "a save under the old admin token is refused");
+  assert.equal(store.has("wl:" + ADMIN), false, "the old record is not put back");
+  assert.equal((await call("/api/watchlists/" + ADMIN, "GET")).status, 404, "the old admin link stays gone");
+  assert.equal((await call("/api/watchlists/" + token, "GET")).status, 200, "the new admin link still works");
 });
 
 test("POST /privacy serves the static privacy page", async () => {

@@ -91,12 +91,19 @@ async function main(): Promise<void> {
   }
   const busy = perRun.filter((c) => c.puts > 0).length;
   const first = perRun[0]!;
+  const ops = (c: Counts) => c.gets + c.puts + c.deletes + c.lists;
+  const busiest = perRun.reduce((a, b) => (ops(b) > ops(a) ? b : a));
+  // Each list costs one write a day on top of the one write per distinct extension in the shared cache.
+  const writesPerList = (counts.puts - IDS_PER_LIST) / LISTS;
+  const listsThatFit = Math.floor((1_000 - IDS_PER_LIST) / writesPerList);
   console.log("Extension Watch unit economics, local simulation with a fake KV");
   console.log("lists seeded " + LISTS + ", ids per list " + IDS_PER_LIST + ", all due for their daily check");
   console.log("first scheduled run (the real Cron Trigger handler)");
   console.log("KV reads " + first.gets + ", KV writes " + first.puts + ", KV deletes " + first.deletes + ", KV list calls " + first.lists + ", subrequests " + first.subrequests);
   console.log("one simulated day of " + RUNS_PER_DAY + " runs, of which " + busy + " checked lists");
   console.log("KV reads " + counts.gets + ", KV writes " + counts.puts + ", KV deletes " + counts.deletes + ", KV list calls " + counts.lists + ", subrequests " + counts.subrequests);
+  console.log("busiest run spends " + ops(busiest) + " KV operations");
+  console.log("with " + IDS_PER_LIST + " shared extensions, " + listsThatFit + " lists fit the 1,000 KV writes a day of Workers Free");
 }
 
 await main();
