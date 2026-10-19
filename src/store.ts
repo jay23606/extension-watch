@@ -66,6 +66,11 @@ export function hasAddressSalt(): boolean {
  */
 export function normalizedAddress(address: string): string {
   const raw = address.trim().replace(/%.*$/, "");
+  // An IPv4 mapped IPv6 address carries a dotted quad in the all zero /64, so hash the IPv4 it stands for.
+  if (raw.includes(".")) {
+    const quad = raw.replace(/^\[|\]$/g, "").split(":").pop() ?? "";
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(quad)) return quad;
+  }
   if (!raw.includes(":")) return raw;
   const sides = raw.replace(/^\[|\]$/g, "").split("::");
   const left = sides[0] ? sides[0].split(":") : [];

@@ -270,6 +270,22 @@ test("IPv6 addresses hash by their /64 prefix, compressed and full forms agree, 
   }
 });
 
+test("an IPv4 mapped IPv6 address is hashed as the embedded IPv4 address", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt(TEST_SALT);
+  try {
+    const mapped = await store.addressHash("::ffff:203.0.113.7");
+    const v4 = await store.addressHash("203.0.113.7");
+    assert.equal(mapped, v4, "the mapped form hashes like the IPv4 it stands for");
+    assert.equal(store.normalizedAddress("::ffff:203.0.113.7"), "203.0.113.7");
+    assert.equal(store.normalizedAddress("[::ffff:198.51.100.9]"), "198.51.100.9");
+    assert.notEqual(mapped, await store.addressHash("::ffff:198.51.100.9"), "distinct clients do not share one bucket");
+    assert.notEqual(store.normalizedAddress("::1"), store.normalizedAddress("::ffff:203.0.113.7"), "the loopback form stays IPv6");
+  } finally {
+    store.setAddressSalt(undefined);
+  }
+});
+
 test("five simultaneous trial claims for one address grant exactly three", async () => {
   const store = await import("../src/store.js");
   store.setAddressSalt(TEST_SALT);

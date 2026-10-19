@@ -487,6 +487,7 @@ function renderWatchlist(data, token) {
   link.textContent = window.location.origin + "/w/" + shareToken;
   $("#watchLinkLabel").textContent = admin ? "Read-only link to share " : "Read-only view ";
   $("#adminNote").hidden = !admin;
+  $("#adminLinkNote").hidden = !admin;
   $("#alertSection").hidden = !admin;
   $("#watchExports").hidden = false;
   wireExports(token, admin, data);

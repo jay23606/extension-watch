@@ -69,6 +69,11 @@ test("the plan badge and the privacy page warn against posting the admin link in
   assert.match(privacy, /Never post your admin link in a public issue\./);
 });
 
+test("the admin link warning is hidden on read-only links and shown with the admin note", () => {
+  assert.match(html, /id="adminLinkNote"[^>]*hidden[^>]*>Never post your admin link in a public issue\./);
+  assert.match(app, /\$\("#adminLinkNote"\)\.hidden = !admin/);
+});
+
 test("the Free badge prints the checked ids clamped and notes extra stored ids", () => {
   assert.match(app, /Math\.min\(usage\.ids, limit\)/);
   assert.match(app, /more are stored but only the first/);

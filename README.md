@@ -42,7 +42,7 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 - No browser extension to install and no agent on employee machines. The service only needs extension IDs.
 - A scheduler runs every 10 minutes, and each watchlist comes due about once a day (after 23 h). The run checks the oldest lists first, so a list is re-checked about once a day rather than every 10 minutes.
 - Packages are streamed, never stored. Google ignores range requests for large packages, so the Worker streams the whole package once and keeps only three things. Those are the first 64 KB, the last 2 MB (where the ZIP index lives), and the bytes after each local header named `manifest.json` or `_locales/<x>/messages.json`. It then reads `manifest.json` at the offset the ZIP index gives and checks that the local header there carries the same name, so a decoy manifest hidden inside another file cannot change the grade. A package with two index entries for `manifest.json` is refused, and a package that could be read before but not after an update is logged and alerted as a high-severity change. Memory follows the size of the wanted entries, not the package. Captures end at the next local header, and entries that inflate past 4 MB are refused. In production, Keeper (a 143 MB package) and RoboForm were read together in 5.5 s. When Google does honour ranges, only the needed parts are fetched. If the name is still a locale key, the display name comes from the extension's Web Store page. The ZIP and DEFLATE decoding is written in the Worker, with no zip library. It handles CRX2, CRX3, data-descriptor entries, comments and a BOM in manifests.
-- Each extension is downloaded at most once a day, whatever the number of watchlists that contain it, and definitive failures (removed from the store, unreadable) are cached for the day too. A cron run checks at most 150 due lists, downloads at most 40 packages and spends at most 800 KV operations (Cloudflare allows 1,000 per invocation). Whatever is left waits for the next run, 10 minutes later.
+- Each extension is downloaded at most once a day, whatever the number of watchlists that contain it, and definitive failures (removed from the store, unreadable) are cached for the day too. A cron run checks at most 150 due lists, downloads at most 40 packages and has a run budget of 800 KV operations (Cloudflare allows 1,000 per invocation), and the busiest simulated run spent 689. Whatever is left waits for the next run, 10 minutes later.
 - Scans run 5 extensions at a time. A scan holds at most 25 extensions and a watchlist at most 50. Per-address daily limits are enforced in Workers KV, at 200 scans, 20 new watchlists and 10 test alerts. They are approximate under parallel requests.
 
 ## Data model (Workers KV)
@@ -157,8 +157,9 @@ Billing is not live yet, and upgrades to Team are granted by the operator with a
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler secret put OPERATOR_CODE         # the code the operator uses to move a list to Team
+npx wrangler secret put ADDRESS_SALT          # a random string of at least 16 characters
 npx wrangler dev
-npm test                                      # 243 tests, no network
+npm test                                      # 245 tests, no network
 npm run check                                 # TypeScript with no errors
 npm run economics                             # measured KV and subrequest counts for a day of checks
 ```
