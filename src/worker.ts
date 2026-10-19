@@ -1,7 +1,7 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, ensureViewToken, IDLE_TTL, load, MAX_IDS, newToken, readAudit, remove, resolveView, rotate, save, type Kv, type Snapshot, type Watchlist } from "./store.js";
+import { allow, appendAudit, cachedSnapshot, cacheSnapshot, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
@@ -19,6 +19,15 @@ const MAX_LISTS_PER_RUN = 150;
 /** KV operations one run may spend (Cloudflare allows 1,000 per invocation); the rest wait for the next run. */
 const KV_BUDGET = 800;
 const POSTPONED = "Check postponed to the next run.";
+/** A Free list keeps the risk report but not the Team exports. Billing is not live yet, so upgrades are by hand. */
+const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the admin to upgrade this list.";
+
+function freePlanResponse(): Response {
+  return Response.json({ error: FREE_PLAN_MESSAGE }, { status: 402 });
+}
+
+/** The exports that belong to the Team plan. */
+const TEAM_EXPORTS = new Set(["export.csv", "changes.csv", "audit.csv", "policy.json"]);
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -155,6 +164,8 @@ async function exportResponse(req: Request, env: Env, rest: string): Promise<Res
   const adminToken = direct ? token : (await resolveView(env.WATCHLISTS, token)) ?? "";
   const wl = direct ?? (adminToken ? await load(env.WATCHLISTS, adminToken) : null);
   if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+  // Every export is a Team feature. A list past its trial on Free gets a plain 402, not a redirect to a pay page.
+  if (effectivePlan(wl) === "free" && TEAM_EXPORTS.has(file)) return freePlanResponse();
   if (file === "export.csv") {
     await appendAudit(env.WATCHLISTS, adminToken, "inventory exported");
     return csvResponse(inventoryCsv(wl), "watchlist-inventory.csv");
@@ -202,11 +213,13 @@ const routes: Record<string, Handler> = {
     }
     if (rest) return Response.json({ error: "Not found." }, { status: 404 });
     if (!(await allow(env.WATCHLISTS, ipOf(req), "watch", 20, today()))) throw new FetchError(429, "Daily watchlist limit reached for this address.");
-    const body = await json<{ name?: unknown; ids?: unknown }>(req);
-    const { ids, dropped } = parseIds(body.ids, MAX_IDS);
+    const body = await json<{ name?: unknown; ids?: unknown; plan?: unknown }>(req);
+    // A new list starts on the Team trial unless the caller asks for Free directly. Team is granted by the admin route.
+    const plan: Plan = String(body.plan ?? "").trim().toLowerCase() === "free" ? "free" : "trial";
+    const { ids, dropped } = parseIds(body.ids, plan === "free" ? FREE_MAX_IDS : MAX_IDS);
     if (ids.length === 0) throw new FetchError(400, "Add at least one extension.");
     const token = newToken(); const now = new Date().toISOString();
-    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now };
+    const wl: Watchlist = { name: String(body.name ?? "My team").trim().slice(0, 60) || "My team", ids, snapshots: {}, changes: [], createdAt: now, lastCheck: now, plan, trialEndsAt: plan === "trial" ? trialEndFrom() : undefined };
     apply(wl, await scanMany(ids, snapshotter(env.WATCHLISTS, new Map(), { left: MAX_IDS, kv: 4 * MAX_IDS })), true); // baseline: no "new" noise
     await ensureViewToken(env.WATCHLISTS, token, wl);
     await save(env.WATCHLISTS, token, wl);
@@ -227,9 +240,11 @@ const routes: Record<string, Handler> = {
     const viewToken = role === "admin" ? await ensureViewToken(env.WATCHLISTS, token, wl) : wl.viewToken;
     if ((wl.viewedAt ?? "").slice(0, 10) !== today() || !hadView) { wl.viewedAt = new Date().toISOString(); await save(env.WATCHLISTS, token, wl); }
     const { webhook, viewToken: _v, audit: _storedAudit, ...shown } = wl;
-    if (role === "viewer") return Response.json({ ...shown, role, webhook: null, webhookSet: Boolean(webhook) });
-    const audit = await readAudit(env.WATCHLISTS, token);
-    return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook), audit });
+    const usage = planUsage(wl);
+    if (role === "viewer") return Response.json({ ...shown, role, webhook: null, webhookSet: Boolean(webhook), usage });
+    // The audit log is a Team feature, so a Free list is shown without one.
+    const audit = usage.plan === "free" ? [] : await readAudit(env.WATCHLISTS, token);
+    return Response.json({ ...shown, role, viewToken, webhook: maskWebhook(webhook), webhookSet: Boolean(webhook), audit, usage });
   },
   "DELETE /api/watchlists": async (_req, env, rest) => {
     const wl = await load(env.WATCHLISTS, rest);
@@ -239,6 +254,20 @@ const routes: Record<string, Handler> = {
     return Response.json({ deleted: true });
   },
   "PUT /api/watchlists": async (req, env, rest) => {
+    // Admin link only: set the plan by hand while billing is not live.
+    if (rest.endsWith("/plan")) {
+      const token = rest.slice(0, -"/plan".length);
+      const wl = await load(env.WATCHLISTS, token);
+      if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
+      const raw = String((await json<{ plan?: unknown }>(req)).plan ?? "").trim().toLowerCase();
+      if (raw !== "free" && raw !== "team") throw new FetchError(400, "Use a plan of free or team.");
+      const plan = raw as Plan;
+      if (plan !== wl.plan) await appendAudit(env.WATCHLISTS, token, "plan set to " + plan);
+      wl.plan = plan;
+      wl.trialEndsAt = undefined;
+      await save(env.WATCHLISTS, token, wl);
+      return Response.json({ plan, usage: planUsage(wl) });
+    }
     const wl = await load(env.WATCHLISTS, rest);
     if (!wl) return Response.json({ error: "This watchlist does not exist." }, { status: 404 });
     const body = await json<{ webhook?: unknown; name?: unknown }>(req);

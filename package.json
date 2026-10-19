@@ -8,7 +8,8 @@
   },
   "scripts": {
     "test": "tsx --test test/*.test.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "economics": "tsx scripts/economics.ts"
   },
   "keywords": [],
   "author": "",

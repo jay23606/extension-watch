@@ -8,7 +8,8 @@ export interface Snapshot { id: string; manifest: Manifest | null; assessment: A
 export type LoggedChange = Omit<Change, "kind"> & { kind: string; id: string; at: string };
 /** One admin action with its time only, never a token or a webhook URL. */
 export interface AuditEntry { at: string; action: string }
-export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; audit?: AuditEntry[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string; viewToken?: string }
+export type Plan = "free" | "team" | "trial";
+export interface Watchlist { name: string; ids: string[]; snapshots: Record<string, Snapshot>; changes: LoggedChange[]; audit?: AuditEntry[]; createdAt: string; lastCheck: string; webhook?: string | null; viewedAt?: string; viewToken?: string; plan?: Plan; trialEndsAt?: string }
 export interface Kv {
   get(k: string): Promise<string | null>;
   put(k: string, v: string, o?: { expirationTtl?: number; metadata?: unknown }): Promise<void>;
@@ -20,7 +21,43 @@ export const MAX_IDS = 50;
 export const MAX_CHANGES = 200;
 export const MAX_AUDIT = 100;
 export const IDLE_TTL = 90 * 86400; // every save renews it; the scheduler stops saving lists nobody opened for 90 days, so they expire
+/** A list on the Free plan holds at most this many extension ids. */
+export const FREE_MAX_IDS = 25;
+/** A new list starts on this many days of the Team plan, so a first visitor sees every feature at once. */
+export const TRIAL_DAYS = 14;
 const CACHE_TTL = 3 * 86400;
+
+/** The instant a Team trial granted now would end. */
+export function trialEndFrom(now = Date.now()): string {
+  return new Date(now + TRIAL_DAYS * 86_400_000).toISOString();
+}
+
+/**
+ * The plan in force for a list right now. A list with no plan field is a legacy list and counts as
+ * Team, so a list saved before plans existed keeps every feature. A trial that has run out is Free.
+ */
+export function effectivePlan(wl: Watchlist, now = Date.now()): "free" | "team" {
+  if (wl.plan === "free") return "free";
+  if (wl.plan !== "trial") return "team";
+  const ends = Date.parse(wl.trialEndsAt ?? "");
+  return Number.isFinite(ends) && now < ends ? "team" : "free";
+}
+
+/** Whole days left in the Team trial, 0 when the list is not on a live trial. */
+export function trialDaysLeft(wl: Watchlist, now = Date.now()): number {
+  if (wl.plan !== "trial") return 0;
+  const ends = Date.parse(wl.trialEndsAt ?? "");
+  if (!Number.isFinite(ends) || now >= ends) return 0;
+  return Math.max(0, Math.ceil((ends - now) / 86_400_000));
+}
+
+/** What the usage badge shows: the plan in force, the ids used and the free limit, and trial days left. */
+export interface PlanUsage { plan: "free" | "team"; ids: number; limit: number | null; trialDaysLeft: number }
+
+export function planUsage(wl: Watchlist, now = Date.now()): PlanUsage {
+  const plan = effectivePlan(wl, now);
+  return { plan, ids: wl.ids.length, limit: plan === "free" ? FREE_MAX_IDS : null, trialDaysLeft: trialDaysLeft(wl, now) };
+}
 
 export function newToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));

@@ -321,6 +321,22 @@ button:focus-visible,
   border: 1px solid rgba(245, 184, 61, 0.3);
 }
 
+/* ---------- usage badge ---------- */
+.watch-usage {
+  margin-top: 8px;
+}
+
+.usage-badge {
+  display: inline-block;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  border-radius: 999px;
+  padding: 3px 12px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
 /* ---------- pricing ---------- */
 .pricing {
   max-width: 980px;

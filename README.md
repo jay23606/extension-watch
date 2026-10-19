@@ -49,7 +49,7 @@ Cron Trigger every 10 min ──── re-checks lists not checked for 23 h, old
 
 | Key | Value | Expiry |
 |---|---|---|
-| `wl:<admin token>` | `{ name, ids[], snapshots{id: {manifest, assessment, error, checkedAt}}, changes[], createdAt, lastCheck, viewedAt, webhook, viewToken }`, with `{ lastCheck }` as key metadata so the scheduler can pick due lists from a listing alone | 90 days, renewed by every save |
+| `wl:<admin token>` | `{ name, ids[], snapshots{id: {manifest, assessment, error, checkedAt}}, changes[], createdAt, lastCheck, viewedAt, webhook, viewToken, plan, trialEndsAt }`, with `{ lastCheck }` as key metadata so the scheduler can pick due lists from a listing alone. `plan` is free, team or trial, and a record with no `plan` counts as Team | 90 days, renewed by every save |
 | `au:<admin token>:<id>` | One admin action as `{ at, action }` in the key metadata, one key per action so concurrent actions cannot overwrite each other, newest 100 kept, moved to the new prefix on rotate and deleted with the list | 90 days |
 | `vw:<read-only token>` | The admin token it belongs to | 400 days |
 | `ext:<extension id>` | The day's snapshot of one extension, shared by every watchlist | 3 days |
@@ -67,6 +67,7 @@ A change is `{ kind, value, severity, id, at }`. The change log keeps the last 2
 | `PUT /api/watchlists/<admin token>` `{ webhook }` | Set or clear the alert webhook |
 | `PUT /api/watchlists/<admin token>` `{ name }` | Rename a watchlist |
 | `DELETE /api/watchlists/<admin token>` | Delete a watchlist and its read-only link |
+| `PUT /api/watchlists/<admin token>/plan` `{ plan }` | Set the plan to free or team. Admin link only, and it is how a Team upgrade is granted by hand while billing is not live |
 | `POST /api/watchlists/<admin token>/rotate` | Issue a new admin token and a new read-only token, move the list to the new key, delete the old keys and return the new links. Admin link only, and both old links return 404 afterwards |
 | `POST /api/test-alert` `{ token: <admin token> }` | Send a labelled test message to the saved webhook |
 | `GET /api/rules` | The full points table |
@@ -117,25 +118,31 @@ Each list keeps an append-only audit log of admin actions, which are created, we
 
 ## Exports
 
-The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold and a mode. Threshold mode, the default, keeps the catch-all installable and blocks only the listed extensions graded at or below the threshold. Default deny mode blocks every extension that is not on the list. Both modes put the debugger block and the sensitive host block on the catch-all entry, so extensions that are not on the list are also kept off the debugger permission and off sensitive sites. In the Google Admin console, open Chrome browser, then Custom Configurations under Chrome Enterprise Core, and paste the JSON. The same JSON can be deployed through the Chrome Group Policy templates on Windows, added to the com.google.Chrome configuration profile plist on macOS, or written to a file under /etc/opt/chrome/policies/managed/ on Linux. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry. A password manager or sign-on tool, found by its extension id, keeps its own vendor domains and the shared sign-in hosts accounts.google.com, login.microsoftonline.com and okta.com out of runtime_blocked_hosts and reaches them through runtime_allowed_hosts. This holds in both modes. A blocked extension needs only the blocked install mode. CSV and policy export are free during the hackathon, and billing is not connected in this version.
+The watchlist page has download buttons for the inventory CSV and the change log CSV. Both links, admin and read-only, can download them. The admin link also builds a Chrome ExtensionSettings policy from a grade threshold and a mode. Threshold mode, the default, keeps the catch-all installable and blocks only the listed extensions graded at or below the threshold. Default deny mode blocks every extension that is not on the list. Both modes put the debugger block and the sensitive host block on the catch-all entry, so extensions that are not on the list are also kept off the debugger permission and off sensitive sites. In the Google Admin console, open Chrome browser, then Custom Configurations under Chrome Enterprise Core, and paste the JSON. The same JSON can be deployed through the Chrome Group Policy templates on Windows, added to the com.google.Chrome configuration profile plist on macOS, or written to a file under /etc/opt/chrome/policies/managed/ on Linux. The policy lists one wildcard host pattern per sensitive domain family, with no path and no port. An allowed extension repeats the debugger and host blocks because Chrome does not inherit them from the catch-all entry. A password manager or sign-on tool, found by its extension id, keeps its own vendor domains and the shared sign-in hosts accounts.google.com, login.microsoftonline.com and okta.com out of runtime_blocked_hosts and reaches them through runtime_allowed_hosts. This holds in both modes. A blocked extension needs only the blocked install mode. CSV and policy export are Team features. A list on the Free plan after its trial answers HTTP 402 on the CSV, policy and audit routes, and billing is not connected in this version.
 
-## Pricing (planned, billing is not connected in this version)
+## Plans (billing is not connected in this version)
 
-| Plan | Price | For |
-|---|---|---|
-| Free | 0 | 10 extensions, weekly check |
-| Team | 29 USD a month | 250 extensions, daily checks, Slack and email alerts, CSV export |
-| Business | 99 USD a month | Unlimited extensions, SSO, policy export for Chrome Enterprise, audit log |
+Every list starts on a 14 day Team trial, so a first visitor sees every feature at once. Free keeps the risk report and up to 25 extension ids per list, and Team removes that id limit and adds the CSV exports, the policy export and the audit log.
 
-The cost to serve a watchlist is at most one streamed download per extension per day on Cloudflare Workers, shared across every customer who watches that extension (an estimate, not yet measured at scale), so the gross margin on Team stays above 90 percent. Revenue grows with the number of extensions watched, which grows with company size.
+Billing is not live yet, and upgrades to Team are granted by hand, so this is a plan and gating model in code, not a paid product. After the trial a Free list answers HTTP 402 with a plain message on the CSV, policy and audit routes, and the watchlist page shows a usage badge with the plan, the ids used of the limit and the trial days left. A list saved before plans existed has no plan field and counts as Team, so nothing saved earlier breaks.
+
+| Plan | Price | Ids per list | Included |
+|---|---|---|---|
+| Free | 0 | up to 25 | Risk report, daily checks, alerts, change log |
+| Team | 29 USD a month | no plan limit, up to the 50 the service holds | Everything in Free, plus CSV exports, the policy export and the audit log |
+
+## Unit economics
+
+`scripts/economics.ts` runs the real scheduled check code against an in-memory fake KV with 300 lists of 20 ids each for one simulated day of 144 runs, and prints the KV reads, KV writes, list calls and subrequests. It is a local simulation with a fake KV, not a measurement on Cloudflare. A day for 300 lists spends 640 KV reads, 320 KV writes and 144 list calls, inside the Workers Free limits, and the details are in [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
 ## Built and planned
 
 | Built in this version | Planned |
 |---|---|
-| Scan and grade up to 25 extensions | Billing and paid plans |
-| Shared daily cache, one download per extension a day | Email alerts |
-| A scheduler runs every 10 minutes and each watchlist is re-checked about once a day, with a change log | Single sign-on |
+| Scan and grade up to 25 extensions | Real billing and payments, with a payment provider |
+| A plan model with a 14 day Team trial, a Free id limit and 402 gating, upgrades by hand | Email alerts |
+| Shared daily cache, one download per extension a day | Single sign-on |
+| A scheduler runs every 10 minutes and each watchlist is re-checked about once a day, with a change log | |
 | Slack, Discord and Google Chat webhook alerts | |
 | Read-only link and admin link for every watchlist | Unlimited extensions |
 | CSV inventory, change log and audit log export | |
@@ -148,8 +155,9 @@ The cost to serve a watchlist is at most one streamed download per extension per
 npm install
 npx wrangler kv namespace create WATCHLISTS   # put the id in wrangler.jsonc
 npx wrangler dev
-npm test                                      # 215 tests, no network
+npm test                                      # 223 tests, no network
 npm run check                                 # TypeScript with no errors
+npm run economics                             # measured KV and subrequest counts for a day of checks
 ```
 
 ## License

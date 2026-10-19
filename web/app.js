@@ -319,6 +319,20 @@ function watchMetaText(data) {
   return when + " \u00b7 " + n + " extension" + (n === 1 ? "" : "s");
 }
 
+function usageBadgeText(usage) {
+  if (!usage) return "";
+  if (usage.plan === "team" && usage.trialDaysLeft > 0) return "Team trial, " + usage.trialDaysLeft + " day" + (usage.trialDaysLeft === 1 ? "" : "s") + " left";
+  if (usage.plan === "free") return "Free plan, " + usage.ids + " of " + (usage.limit || 25) + " extensions";
+  return "Team plan";
+}
+
+function showUsage(usage) {
+  const node = $("#usageBadge");
+  const text = usageBadgeText(usage);
+  node.textContent = text;
+  node.hidden = !text;
+}
+
 function buildChangeList(changes) {
   const wrap = el("div", "changelog");
   if (!changes || !changes.length) {
@@ -351,6 +365,8 @@ const AUDIT_LABEL = {
   deleted: "List deleted",
   rotate: "Links rotated",
   renamed: "Renamed",
+  "plan set to team": "Plan upgraded to Team",
+  "plan set to free": "Plan set to Free",
 };
 
 function buildAuditList(entries) {
@@ -434,8 +450,16 @@ function wireExports(token, admin, data) {
   $("#exportAudit").href = base + "/audit.csv";
   $("#exportAudit").hidden = !admin;
   $("#policyTools").hidden = !admin;
-  $("#policyNote").hidden = !admin;
-  $("#policyModes").hidden = !admin;
+  // A Free list past its trial keeps the risk report but not the Team exports, which the API answers with 402.
+  const free = Boolean(data && data.usage && data.usage.plan === "free");
+  if (free) {
+    $("#exportCsv").hidden = true;
+    $("#exportChanges").hidden = true;
+    $("#exportAudit").hidden = true;
+    $("#policyTools").hidden = true;
+  }
+  $("#policyNote").hidden = !admin || free;
+  $("#policyModes").hidden = !admin || free;
   const policy = $("#exportPolicy");
   const mode = $("#policyMode");
   const threshold = $("#policyThreshold");
@@ -453,6 +477,7 @@ function wireExports(token, admin, data) {
 function renderWatchlist(data, token) {
   $("#watchTitle").textContent = (data && data.name) || "Watchlist";
   $("#watchMeta").textContent = watchMetaText(data);
+  showUsage(data && data.usage);
   const admin = Boolean(data && data.role === "admin");
   const shareToken = admin && data.viewToken ? data.viewToken : token;
   const link = $("#watchLink");
@@ -497,8 +522,9 @@ function renderWatchlist(data, token) {
   const list = ids.map((id) => snaps[id]).filter(Boolean);
   exts.replaceChildren(buildWatchExtensions(list));
   const auditSection = $("#auditSection");
-  auditSection.hidden = !admin;
-  if (admin) $("#watchAudit").replaceChildren(buildAuditList((data && data.audit) || []));
+  const free = Boolean(data && data.usage && data.usage.plan === "free");
+  auditSection.hidden = !admin || free;
+  if (admin && !free) $("#watchAudit").replaceChildren(buildAuditList((data && data.audit) || []));
   let warning = "";
   try {
     warning = window.sessionStorage.getItem("ew-watch-warning") || "";
@@ -652,6 +678,7 @@ function route() {
       $("#watchLink").textContent = "";
       $("#watchChanges").replaceChildren();
       $("#watchExtensions").replaceChildren();
+      showUsage(null);
       showWatchWarning("");
       $("#watchExports").hidden = true;
     });
