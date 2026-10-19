@@ -1,13 +1,13 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, appendAudit, cachedSnapshot, cacheSnapshot, claimTrial, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
+import { allow, appendAudit, cachedSnapshot, cacheSnapshot, claimTrial, setAddressSalt, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
 
 interface RateLimit { limit(o: { key: string }): Promise<{ success: boolean }> }
-interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv; WRITE_LIMIT?: RateLimit; OPERATOR_CODE?: string }
+interface Env { ASSETS: { fetch: (r: Request) => Promise<Response> }; WATCHLISTS: Kv; WRITE_LIMIT?: RateLimit; OPERATOR_CODE?: string; ADDRESS_SALT?: string }
 
 const MAX_SCAN = 25;
 const NOT_LISTED = "Not on the Chrome Web Store";
@@ -20,7 +20,7 @@ const MAX_LISTS_PER_RUN = 150;
 const KV_BUDGET = 800;
 const POSTPONED = "Check postponed to the next run.";
 /** A Free list keeps the risk report but not the Team exports. Billing is not live yet, so upgrades are by hand. */
-const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the admin to upgrade this list.";
+const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the operator to upgrade this list.";
 /** Shown when one address tries a second new list inside the trial window. */
 const TRIAL_USED_MESSAGE = "This address already started 3 trials in the last 30 days, so this new list starts on the Free plan.";
 
@@ -234,7 +234,7 @@ const routes: Record<string, Handler> = {
     if (!(await allow(env.WATCHLISTS, ipOf(req), "watch", 20, today()))) throw new FetchError(429, "Daily watchlist limit reached for this address.");
     const body = await json<{ name?: unknown; ids?: unknown; plan?: unknown }>(req);
     // A new list starts on the Team trial unless the caller asks for Free directly, or this address
-    // already used its one trial inside the window. Team is granted later by the operator route.
+    // already used its 3 trials inside the window. Team is granted later by the operator route.
     const wantsFree = String(body.plan ?? "").trim().toLowerCase() === "free";
     const allIds = parseIds(body.ids, MAX_IDS).ids;
     if (allIds.length === 0) throw new FetchError(400, "Add at least one extension.");
@@ -334,6 +334,7 @@ const routes: Record<string, Handler> = {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    setAddressSalt(env.ADDRESS_SALT);
     const res = secure(await route(request, env));
     // A response that can carry a watchlist token or an export must never be stored by a shared cache.
     if (new URL(request.url).pathname.startsWith("/api/")) res.headers.set("cache-control", "no-store");

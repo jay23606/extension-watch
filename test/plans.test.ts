@@ -233,3 +233,18 @@ test("an explicit Free list does not consume the trial, and an expired marker gr
     assert.equal(again.plan, "trial", "after the marker expires a new trial is granted");
   } finally { globalThis.fetch = real; }
 });
+
+test("address hashes are salted and rate limit keys never hold the raw address", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt("salt-a");
+  const a = await store.addressHash("203.0.113.7");
+  store.setAddressSalt("salt-b");
+  const b = await store.addressHash("203.0.113.7");
+  assert.notEqual(a, b, "a different salt gives a different hash");
+  const { kv, store: raw } = memKv();
+  assert.equal(await store.allow(kv, "203.0.113.7", "scan", 5, "2026-10-19"), true);
+  const keys = [...raw.keys()].filter((k) => k.startsWith("rl:"));
+  assert.equal(keys.length, 1);
+  assert.ok(!keys[0]!.includes("203.0.113.7"), keys[0]);
+  store.setAddressSalt(undefined);
+});

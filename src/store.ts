@@ -37,8 +37,15 @@ export function trialEndFrom(now = Date.now()): string {
 }
 
 /** A hex SHA-256 of the client address, so the trial marker never stores the raw address. */
+let addressSalt = "";
+
+/** The Worker sets a secret salt per request, so a stored address hash cannot be reversed by trying every IPv4 address. */
+export function setAddressSalt(salt: string | undefined): void {
+  addressSalt = salt ?? "";
+}
+
 export async function addressHash(address: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(address));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(addressSalt + "|" + address));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -257,7 +264,8 @@ export async function cacheSnapshot(kv: Kv, snap: Snapshot, day: string): Promis
 
 /** Per-address daily counter for anonymous writes. Returns false when the limit is reached. */
 export async function allow(kv: Kv, ip: string, action: string, limit: number, day: string): Promise<boolean> {
-  const key = `rl:${action}:${day}:${ip.slice(0, 64)}`;
+  // Daily counters are keyed by the salted address hash, never the raw address.
+  const key = `rl:${action}:${day}:${(await addressHash(ip)).slice(0, 32)}`;
   const used = Number((await kv.get(key)) ?? "0");
   if (used >= limit) return false;
   await kv.put(key, String(used + 1), { expirationTtl: 2 * 86400 });
