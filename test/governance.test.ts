@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { applySnapshots } from "../src/worker.js";
-import { appendAudit, logAudit, MAX_AUDIT, readAudit, type Snapshot, type Watchlist } from "../src/store.js";
+import { appendAudit, logAudit, MAX_AUDIT, readAudit, save, type Snapshot, type Watchlist } from "../src/store.js";
 import type { Manifest } from "../src/types.js";
 
 const ID_A = "a".repeat(32);
 const ADMIN = "K".repeat(43);
 const VIEWER = "V".repeat(43);
+const TEST_SALT = "test-address-salt-0123456789";
 const WEBHOOK = "https://hooks.slack.com/services/T000/B000/secretsecret";
 
 const man = (over: Partial<Manifest> = {}): Manifest => ({ id: ID_A, name: "Calc", version: "1", manifestVersion: 3, permissions: ["storage"],
@@ -37,7 +38,7 @@ async function seed(over: Partial<Watchlist> = {}) {
   await kv.put("wl:" + ADMIN, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
   await kv.put("vw:" + VIEWER, ADMIN);
   const mod = await import("../src/worker.js");
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   const call = (path: string, method = "GET", body?: unknown, ct = "application/json") =>
     mod.default.fetch(jsonReq("http://x" + path, method, body, ct), env as never);
   return { store, kv, wl, call };
@@ -150,7 +151,7 @@ test("creating a watchlist logs a created action", async () => {
   const real = globalThis.fetch;
   globalThis.fetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
   let created: { token: string } | undefined;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   try {
     const res = await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "Team", ids: [ID_A] }), env as never);
     created = await res.json() as { token: string };
@@ -219,6 +220,15 @@ test("deleting a list removes its audit keys", async () => {
   assert.ok([...store.keys()].some((k) => k.startsWith("au:" + ADMIN + ":")), "the action is stored under its own key");
   assert.equal((await call("/api/watchlists/" + ADMIN, "DELETE")).status, 200);
   assert.equal([...store.keys()].some((k) => k.startsWith("au:" + ADMIN + ":")), false, "the audit keys are removed with the list");
+});
+
+test("a deleted list writes a tombstone so a stale save cannot recreate it", async () => {
+  const { store, kv, wl, call } = await seed();
+  assert.equal((await call("/api/watchlists/" + ADMIN, "DELETE")).status, 200);
+  assert.ok(store.has("del:" + ADMIN), "the delete writes a tombstone");
+  assert.equal(await save(kv, ADMIN, wl), false, "a save after the delete is refused");
+  assert.equal(store.has("wl:" + ADMIN), false, "the old record is not put back");
+  assert.equal((await call("/api/watchlists/" + ADMIN, "GET")).status, 404, "the deleted link stays gone");
 });
 
 test("POST /privacy serves the static privacy page", async () => {

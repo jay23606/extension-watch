@@ -35,6 +35,7 @@ const jsonReq = (url: string, method: string, body?: unknown, ct = "application/
   new Request(url, { method, headers: { "content-type": ct, "cf-connecting-ip": "7.7.7.7" }, body: body === undefined ? undefined : JSON.stringify(body) });
 
 const OPERATOR = "operator-code-for-tests-0123456789";
+const TEST_SALT = "test-address-salt-0123456789";
 
 async function seed(over: Partial<Watchlist> = {}) {
   const { store, kv } = memKv();
@@ -44,7 +45,7 @@ async function seed(over: Partial<Watchlist> = {}) {
   await kv.put("wl:" + ADMIN, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
   await kv.put("vw:" + VIEWER, ADMIN);
   const mod = await import("../src/worker.js");
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, OPERATOR_CODE: OPERATOR };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, OPERATOR_CODE: OPERATOR, ADDRESS_SALT: TEST_SALT };
   const call = (path: string, method = "GET", body?: unknown, ct = "application/json", headers: Record<string, string> = {}) => {
     const req = jsonReq("http://x" + path, method, body, ct);
     for (const [k, v] of Object.entries(headers)) req.headers.set(k, v);
@@ -60,7 +61,7 @@ test("a new list starts on the Team trial and the badge shows the days left", as
   const body = manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "1", permissions: ["storage"] }) as unknown as BodyInit;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   let created: { token: string } | undefined;
   try {
     const res = await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "Team", ids: [idAt(0)] }), env as never);
@@ -80,7 +81,7 @@ test("a Free list keeps the first 25 ids and reports the rest as dropped", async
   const body = manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "1", permissions: ["storage"] }) as unknown as BodyInit;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => new Response(body, { status: 200 })) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   const ids = Array.from({ length: 30 }, (_, i) => idAt(i));
   let created: { token: string; dropped: number } | undefined;
   try {
@@ -101,7 +102,9 @@ test("a Free list gets 402 on the CSV, policy and audit exports", async () => {
     assert.equal(res.status, 402, file);
     const body = await res.json() as { error: string };
     assert.match(body.error, /Free plan/, file);
-    assert.ok(!body.error.includes(":"), "the message has no colon");
+    assert.match(body.error, /github\.com\/theluckystrike/, "the operator address is in the 402 body");
+    assert.match(body.error, /https:\/\/github\.com\/theluckystrike\/extension-watch\/issues/, "the issues link is in the 402 body");
+    assert.ok(!body.error.replace(/https?:\/\/\S+/g, "").includes(":"), "the message has no colon outside a URL");
   }
 });
 
@@ -182,7 +185,7 @@ test("three trials per address, a fourth new list inside the window starts Free 
   const { kv } = memKv();
   const real = globalThis.fetch;
   globalThis.fetch = (async () => crxOk()) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   const create = async (name: string, i: number) =>
     await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name, ids: [idAt(i)] }), env as never)).json() as { token: string; plan: string; note?: string };
   try {
@@ -205,14 +208,14 @@ test("the trial marker stores a SHA-256 hash of the address with a 30 day TTL", 
   const { kv, store } = memKv();
   const real = globalThis.fetch;
   globalThis.fetch = (async () => crxOk()) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   try {
     await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "A", ids: [idAt(0)] }), env as never);
   } finally { globalThis.fetch = real; }
   const marker = [...store.keys()].find((k) => k.startsWith("tri:"));
   assert.ok(marker, "a trial marker is written");
   assert.ok(!marker!.includes("7.7.7.7"), "the raw address is never stored in the key");
-  assert.match(marker!.slice(4), /^[0-9a-f]{64}$/, "the key holds a hex SHA-256 of the address");
+  assert.match(marker!.slice(4).split(":")[0]!, /^[0-9a-f]{64}$/, "the key holds a hex SHA-256 of the address");
   assert.equal(store.get(marker!)?.ttl, 30 * 86400, "the marker expires in 30 days");
 });
 
@@ -221,7 +224,7 @@ test("an explicit Free list does not consume the trial, and an expired marker gr
   const { kv, store } = memKv();
   const real = globalThis.fetch;
   globalThis.fetch = (async () => crxOk()) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   try {
     const free = await (await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "F", ids: [idAt(0)], plan: "free" }), env as never)).json() as { plan: string };
     assert.equal(free.plan, "free");
@@ -236,9 +239,9 @@ test("an explicit Free list does not consume the trial, and an expired marker gr
 
 test("address hashes are salted and rate limit keys never hold the raw address", async () => {
   const store = await import("../src/store.js");
-  store.setAddressSalt("salt-a");
+  store.setAddressSalt("salt-a-0123456789");
   const a = await store.addressHash("203.0.113.7");
-  store.setAddressSalt("salt-b");
+  store.setAddressSalt("salt-b-0123456789");
   const b = await store.addressHash("203.0.113.7");
   assert.notEqual(a, b, "a different salt gives a different hash");
   const { kv, store: raw } = memKv();
@@ -247,4 +250,59 @@ test("address hashes are salted and rate limit keys never hold the raw address",
   assert.equal(keys.length, 1);
   assert.ok(!keys[0]!.includes("203.0.113.7"), keys[0]);
   store.setAddressSalt(undefined);
+});
+
+test("IPv6 addresses hash by their /64 prefix, compressed and full forms agree, IPv4 stays whole", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt(TEST_SALT);
+  try {
+    const compressed = await store.addressHash("2001:db8:85a3::8a2e:370:7334");
+    const full = await store.addressHash("2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+    assert.equal(compressed, full, "the same /64 hashes the same in both forms");
+    const next = await store.addressHash("2001:db8:85a3:1::1");
+    assert.notEqual(compressed, next, "a different /64 hashes differently");
+    const v4a = await store.addressHash("203.0.113.7");
+    const v4b = await store.addressHash("203.0.113.8");
+    assert.notEqual(v4a, v4b, "IPv4 addresses are hashed whole, not by a prefix");
+  } finally {
+    store.setAddressSalt(undefined);
+  }
+});
+
+test("five simultaneous trial claims for one address grant at most three", async () => {
+  const store = await import("../src/store.js");
+  store.setAddressSalt(TEST_SALT);
+  const { kv, store: raw } = memKv();
+  try {
+    const results = await Promise.all(Array.from({ length: 5 }, () => store.claimTrial(kv, "198.51.100.9")));
+    const granted = results.filter(Boolean).length;
+    assert.ok(granted <= 3, "at most 3 claims succeed, got " + granted);
+    const markers = [...raw.keys()].filter((k) => k.startsWith("tri:"));
+    assert.equal(markers.length, granted, "a refused claim removes its own marker");
+  } finally {
+    store.setAddressSalt(undefined);
+  }
+});
+
+test("a missing or short ADDRESS_SALT returns 503 on the trial and rate limit paths and logs one line", async () => {
+  const mod = await import("../src/worker.js");
+  const { kv } = memKv();
+  const logs: string[] = [];
+  const real = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  try {
+    for (const salt of [undefined, "short"]) {
+      const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: salt };
+      const scan = await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: [idAt(0)] }), env as never);
+      assert.equal(scan.status, 503);
+      assert.deepEqual(await scan.json(), { error: "server misconfigured, address salt missing" });
+      const create = await mod.default.fetch(jsonReq("http://x/api/watchlists", "POST", { name: "A", ids: [idAt(1)] }), env as never);
+      assert.equal(create.status, 503);
+      assert.deepEqual(await create.json(), { error: "server misconfigured, address salt missing" });
+    }
+    assert.equal(logs.length, 4, "one log line for each refused request");
+    assert.match(logs[0]!, /server misconfigured, address salt missing/);
+  } finally {
+    console.error = real;
+  }
 });

@@ -4,6 +4,8 @@ import { applySnapshots } from "../src/worker.js";
 import type { Snapshot, Watchlist } from "../src/store.js";
 import type { Manifest } from "../src/types.js";
 
+const TEST_SALT = "test-address-salt-0123456789";
+
 const man = (over: Partial<Manifest> = {}): Manifest => ({ id: "a".repeat(32), name: "Calc", version: "1", manifestVersion: 3, permissions: ["storage"],
   optionalPermissions: [], hostPermissions: [], contentScriptMatches: [], externallyConnectable: [], hasBackground: false, csp: null, updateUrl: null, description: "", ...over });
 const snap = (m: Manifest | null, error: string | null = null): Snapshot => ({ id: "a".repeat(32), manifest: m, assessment: null, error, checkedAt: new Date().toISOString() });
@@ -65,7 +67,7 @@ test("reads mask the webhook and record the view; idle lists are not re-checked"
   const real = globalThis.fetch;
   globalThis.fetch = (async () => { fetched++; return new Response(null, { status: 204 }); }) as typeof fetch;
   try {
-    const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+    const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
     const stored = JSON.parse(store.get("wl:" + token)!);
     store.set("wl:" + token, JSON.stringify({ ...stored, webhook: null }));
     await mod.default.scheduled({}, env as never);
@@ -114,7 +116,7 @@ test("N1: alerts still go out when the change log is already full", async () => 
     const { manifestCrxForTest } = await import("./helpers.js");
     return new Response(manifestCrxForTest({ manifest_version: 3, name: "Calc", version: "2", permissions: ["storage", "cookies"] }) as unknown as BodyInit, { status: 200 });
   }) as typeof fetch;
-  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; }
   assert.equal(posts.length, 1);
   assert.match(posts[0]!, /cookies/);
 });
@@ -132,7 +134,7 @@ test("N2/N3: a list of removed extensions counts as checked, is cached, and cann
   let downloads = 0;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => { downloads++; return new Response(null, { status: 204 }); }) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   try {
     await mod.default.scheduled({}, env as never);
     assert.ok(downloads <= 40, `budget is a hard limit, got ${downloads}`);
@@ -145,7 +147,7 @@ test("N2/N3: a list of removed extensions counts as checked, is cached, and cann
 test("N5: a text/plain request that mentions application/json is rejected", async () => {
   const mod = await import("../src/worker.js");
   const { kv } = memKv();
-  const res = await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "a".repeat(32) }, "text/plain; application/json"), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never);
+  const res = await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "a".repeat(32) }, "text/plain; application/json"), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never);
   assert.equal(res.status, 415);
 });
 
@@ -155,7 +157,7 @@ test("N6: the read-only link shows the list but cannot change alerts or delete i
   const admin = "D".repeat(43);
   const { put } = seeded(admin, { webhook: "https://hooks.slack.com/services/T/B/SECRET" });
   await put(kv);
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never;
   const a = await (await mod.default.fetch(jsonReq("http://x/api/watchlists/" + admin, "GET"), env)).json() as { role: string; viewToken: string; webhook: string };
   assert.equal(a.role, "admin");
   assert.equal(a.webhook, "https://hooks.slack.com/...");
@@ -177,7 +179,7 @@ test("N7: a list with a webhook keeps being checked after 90 days without a page
   await put(kv);
   const real = globalThis.fetch;
   globalThis.fetch = (async (url: string) => String(url).includes("hooks.slack.com") ? new Response("ok") : new Response(null, { status: 204 })) as typeof fetch;
-  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; }
   assert.notEqual(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z");
 });
 
@@ -185,7 +187,7 @@ test("N8: the burst limit binding answers 429 on writes", async () => {
   const mod = await import("../src/worker.js");
   const { kv } = memKv();
   let n = 0;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, WRITE_LIMIT: { limit: async () => ({ success: ++n <= 2 }) } } as never;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT, WRITE_LIMIT: { limit: async () => ({ success: ++n <= 2 }) } } as never;
   const statuses = [];
   for (let i = 0; i < 3; i++) statuses.push((await mod.default.fetch(jsonReq("http://x/api/scan", "POST", { ids: "x" }), env)).status);
   assert.deepEqual(statuses, [400, 400, 429]);
@@ -212,7 +214,7 @@ test("P1: a list stays due until every extension got an answer, then completes o
   let downloads = 0;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => { downloads++; return new Response(body, { status: 200 }); }) as typeof fetch;
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never;
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never;
   try {
     await mod.default.scheduled({}, env);
     assert.equal(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z", "40 of 50 done: still due");
@@ -234,7 +236,7 @@ test("P2: the test alert carries the read-only link, never the admin link", asyn
   const real = globalThis.fetch;
   globalThis.fetch = (async (_u: string, init?: RequestInit) => { bodies.push(String(init?.body)); return new Response("ok"); }) as typeof fetch;
   try {
-    const res = await mod.default.fetch(jsonReq("http://x/api/test-alert", "POST", { token: admin }), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never);
+    const res = await mod.default.fetch(jsonReq("http://x/api/test-alert", "POST", { token: admin }), { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never);
     assert.equal(res.status, 200);
   } finally { globalThis.fetch = real; }
   assert.ok(!bodies[0]!.includes(admin), "admin token must not be posted to chat");
@@ -251,7 +253,7 @@ test("P8: a list with a webhook stops being checked after 365 days without a vie
   let fetched = 0;
   const real = globalThis.fetch;
   globalThis.fetch = (async () => { fetched++; return new Response(null, { status: 204 }); }) as typeof fetch;
-  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; }
   assert.equal(fetched, 0);
   assert.equal(JSON.parse(store.get("wl:" + token)!.v).lastCheck, "2026-01-01T00:00:00Z");
 });
@@ -267,6 +269,6 @@ test("P7: a webhook removed while a check runs stays removed", async () => {
     const wl = JSON.parse(store.get("wl:" + token)!.v); wl.webhook = null; store.set("wl:" + token, { v: JSON.stringify(wl) }); // admin turns alerts off mid-check
     return new Response(null, { status: 204 });
   }) as typeof fetch;
-  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } } as never); } finally { globalThis.fetch = real; }
+  try { await mod.default.scheduled({}, { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT } as never); } finally { globalThis.fetch = real; }
   assert.equal(JSON.parse(store.get("wl:" + token)!.v).webhook, null);
 });

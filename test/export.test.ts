@@ -7,6 +7,7 @@ import type { Manifest } from "../src/types";
 
 const ADMIN = "K".repeat(43);
 const VIEWER = "V".repeat(43);
+const TEST_SALT = "test-address-salt-0123456789";
 const ID_A = "a".repeat(32);
 const ID_D = "d".repeat(32);
 const ID_F = "f".repeat(32);
@@ -69,7 +70,7 @@ const seedList = async () => {
   };
   await kv.put(`wl:${ADMIN}`, JSON.stringify(wl), { metadata: { lastCheck: wl.lastCheck } });
   await kv.put(`vw:${VIEWER}`, ADMIN);
-  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") } };
+  const env = { WATCHLISTS: kv, ASSETS: { fetch: async () => new Response("") }, ADDRESS_SALT: TEST_SALT };
   const mod = await import("../src/worker.js");
   const get = (path: string) => mod.default.fetch(new Request("http://x" + path), env as never);
   return { store, kv, wl, get };

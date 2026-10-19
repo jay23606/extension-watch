@@ -1,7 +1,7 @@
 import { fetchManifest, normalizeId } from "./crx.js";
 import { diff } from "./diff.js";
 import { assess, RULES } from "./risk.js";
-import { allow, appendAudit, cachedSnapshot, cacheSnapshot, claimTrial, setAddressSalt, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
+import { AddressSaltMissing, allow, appendAudit, cachedSnapshot, cacheSnapshot, claimTrial, setAddressSalt, dueTokens, effectivePlan, ensureViewToken, FREE_MAX_IDS, idsToCheck, IDLE_TTL, load, MAX_IDS, newToken, planUsage, readAudit, remove, resolveView, rotate, save, trialEndFrom, type Kv, type Plan, type Snapshot, type Watchlist } from "./store.js";
 import { auditCsv, changesCsv, inventoryCsv, modeFrom, policyFor, thresholdFrom } from "./export.js";
 import { FetchError } from "./types.js";
 import { alertable, maskWebhook, sendAlert, webhookProblem } from "./alert.js";
@@ -20,7 +20,7 @@ const MAX_LISTS_PER_RUN = 150;
 const KV_BUDGET = 800;
 const POSTPONED = "Check postponed to the next run.";
 /** A Free list keeps the risk report but not the Team exports. Billing is not live yet, so upgrades are by hand. */
-const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the operator to upgrade this list.";
+const FREE_PLAN_MESSAGE = "This list is on the Free plan. The CSV exports, the policy export and the audit log are part of Team. Billing is not live yet, so ask the operator to upgrade this list. Contact the operator at github.com/theluckystrike or open an issue at https://github.com/theluckystrike/extension-watch/issues.";
 /** Shown when one address tries a second new list inside the trial window. */
 const TRIAL_USED_MESSAGE = "This address already started 3 trials in the last 30 days, so this new list starts on the Free plan.";
 
@@ -346,7 +346,7 @@ export default {
     const origin = env.ORIGIN ?? "https://extension-watch.lipmichal.workers.dev";
     for (const token of (await dueTokens(env.WATCHLISTS, DAY_MS - 3_600_000)).slice(0, MAX_LISTS_PER_RUN)) {
       if (budget.left <= 0 || budget.kv <= 10) break;
-      budget.kv -= 4; // load, re-load before save, save, and the view-token write when one is created
+      budget.kv -= 6; // load, re-load before save, save with its two tombstone checks, and the view-token write when one is created
       await recheck(env.WATCHLISTS, token, get, origin);
     }
   },
@@ -379,6 +379,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(request);
     if (!handler) return Response.json({ error: "Not found." }, { status: 404 });
     try { return await handler(request, env, rest); } catch (err) {
+      if (err instanceof AddressSaltMissing) {
+        console.error(err.message);
+        return Response.json({ error: err.message }, { status: 503 });
+      }
       const status = err instanceof FetchError ? err.status : 500;
       return Response.json({ error: err instanceof FetchError ? err.message : "Something went wrong." }, { status: status >= 400 && status < 600 ? status : 500 });
     }

@@ -36,44 +36,118 @@ export function trialEndFrom(now = Date.now()): string {
   return new Date(now + TRIAL_DAYS * 86_400_000).toISOString();
 }
 
-/** A hex SHA-256 of the client address, so the trial marker never stores the raw address. */
-let addressSalt = "";
-
-/** The Worker sets a secret salt per request, so a stored address hash cannot be reversed by trying every IPv4 address. */
-export function setAddressSalt(salt: string | undefined): void {
-  addressSalt = salt ?? "";
+/** Thrown when the Worker has no usable address salt, so no address hash could be safe. */
+export class AddressSaltMissing extends Error {
+  constructor() {
+    super("server misconfigured, address salt missing");
+    this.name = "AddressSaltMissing";
+  }
 }
 
-export async function addressHash(address: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(addressSalt + "|" + address));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+/** A hex SHA-256 of the client address, so the trial markers never store the raw address. */
+let addressSalt = "";
+
+/**
+ * The Worker sets a secret salt per request, so a stored address hash cannot be reversed by trying
+ * every address. A missing or short secret is refused rather than replaced by an empty salt.
+ */
+export function setAddressSalt(salt: string | undefined): void {
+  const value = (salt ?? "").trim();
+  addressSalt = value.length >= 16 ? value : "";
+}
+
+export function hasAddressSalt(): boolean {
+  return addressSalt.length >= 16;
 }
 
 /**
- * Claim the one Team trial for this address inside the window. True when the trial was granted
- * now, false when the address already used it. The marker is keyed by the address hash only.
+ * The value that identifies a client for hashing. IPv4 stays whole. IPv6 is reduced to its /64
+ * prefix after expanding "::", because one subscriber is normally handed a whole /64.
+ */
+export function normalizedAddress(address: string): string {
+  const raw = address.trim().replace(/%.*$/, "");
+  if (!raw.includes(":")) return raw;
+  const sides = raw.replace(/^\[|\]$/g, "").split("::");
+  const left = sides[0] ? sides[0].split(":") : [];
+  const right = sides.length > 1 && sides[1] ? sides[1].split(":") : [];
+  const missing = Math.max(0, 8 - left.length - right.length);
+  const hextets = [...left, ...Array<string>(missing).fill("0"), ...right];
+  return hextets.slice(0, 4).map((h) => (h || "0").toLowerCase().padStart(4, "0")).join(":");
+}
+
+export async function addressHash(address: string): Promise<string> {
+  if (!hasAddressSalt()) throw new AddressSaltMissing();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(addressSalt + "|" + normalizedAddress(address)));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** One time-sortable, unique trial attempt id, so each claim gets its own key. */
+let trialSeq = 0;
+function trialId(now: number): string {
+  trialSeq = (trialSeq + 1) % 1_000_000;
+  const bytes = crypto.getRandomValues(new Uint8Array(4));
+  const rand = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${now.toString().padStart(13, "0")}-${trialSeq.toString().padStart(6, "0")}-${rand}`;
+}
+
+interface TrialMarker { name: string; at: number }
+
+/** Every trial marker for one address hash, including legacy single counter records. */
+async function trialMarkers(kv: Kv, hash: string): Promise<TrialMarker[]> {
+  const base = `tri:${hash}`;
+  const out: TrialMarker[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 25; page++) {
+    const res = await kv.list({ prefix: base, cursor });
+    for (const k of res.keys) {
+      if (k.name === base) {
+        const raw = await kv.get(base);
+        if (!raw) continue;
+        let count = 1;
+        let at = 0;
+        try {
+          const parsed = JSON.parse(raw) as { count?: unknown; first?: unknown };
+          count = typeof parsed.count === "number" ? parsed.count : 1;
+          at = typeof parsed.first === "number" ? parsed.first : 0;
+        } catch {
+          at = Date.parse(raw) || 0;
+        }
+        // A legacy record held a count in one key, so it counts as that many attempts in the window.
+        for (let i = 0; i < count; i++) out.push({ name: `${base}:${i.toString().padStart(13, "0")}`, at });
+      } else if (k.name.startsWith(base + ":")) {
+        const meta = k.metadata as { at?: unknown } | undefined;
+        const stamp = Number(k.name.slice(base.length + 1, base.length + 14));
+        out.push({ name: k.name, at: typeof meta?.at === "number" ? meta.at : Number.isFinite(stamp) ? stamp : 0 });
+      }
+    }
+    if (res.list_complete || !res.cursor) break;
+    cursor = res.cursor;
+  }
+  return out;
+}
+
+/**
+ * Claim one Team trial for this address inside the window. Workers KV has no compare and set, so
+ * each attempt writes its own unique marker, then reads the markers back and refuses when its
+ * place in the order is past the cap. Concurrent attempts in one location keep the cap. KV reads
+ * can lag behind writes in another location, so the cap is best effort across locations.
  */
 export async function claimTrial(kv: Kv, address: string, now = Date.now()): Promise<boolean> {
-  const key = `tri:${await addressHash(address)}`;
-  const raw = await kv.get(key);
-  let state = { count: 0, first: now };
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as { count?: unknown; first?: unknown };
-      // A marker from the first version held a date string and stood for one trial.
-      state = { count: typeof parsed.count === "number" ? parsed.count : 1, first: typeof parsed.first === "number" ? parsed.first : now };
-    } catch {
-      state = { count: 1, first: Date.parse(raw) || now };
-    }
-  }
-  const windowEnd = state.first + TRIAL_WINDOW_DAYS * 86_400_000;
-  if (now >= windowEnd) state = { count: 0, first: now };
-  if (state.count >= TRIALS_PER_WINDOW) return false;
-  state.count += 1;
+  const hash = await addressHash(address);
+  const base = `tri:${hash}`;
+  const existing = await trialMarkers(kv, hash);
+  const inWindow = existing.filter((m) => m.at + TRIAL_WINDOW_DAYS * 86_400_000 > now);
+  const first = inWindow.length ? Math.min(...inWindow.map((m) => m.at)) : now;
   // The window is fixed from the first trial, so later trials do not extend it.
-  const ttl = Math.max(60, Math.ceil((state.first + TRIAL_WINDOW_DAYS * 86_400_000 - now) / 1000));
-  await kv.put(key, JSON.stringify(state), { expirationTtl: ttl });
-  return true;
+  const windowEnd = first + TRIAL_WINDOW_DAYS * 86_400_000;
+  const ttl = Math.max(60, Math.ceil((windowEnd - now) / 1000));
+  const key = `${base}:${trialId(now)}`;
+  await kv.put(key, JSON.stringify({ at: now }), { expirationTtl: ttl, metadata: { at: now } });
+  const after = (await trialMarkers(kv, hash)).filter((m) => m.at + TRIAL_WINDOW_DAYS * 86_400_000 > now);
+  const place = after.filter((m) => m.name <= key).length;
+  if (place <= TRIALS_PER_WINDOW) return true;
+  await kv.delete(key);
+  return false;
 }
 
 /**
@@ -121,9 +195,24 @@ export async function load(kv: Kv, token: string): Promise<Watchlist | null> {
   return raw ? (JSON.parse(raw) as Watchlist) : null;
 }
 
-export async function save(kv: Kv, token: string, wl: Watchlist): Promise<void> {
+const TOMBSTONE_PREFIX = "del:";
+const TOMBSTONE_TTL = 400 * 86400;
+
+/** True when this admin token was deleted, so a slow check cannot recreate it with old data. */
+export async function isDeleted(kv: Kv, token: string): Promise<boolean> {
+  return (await kv.get(TOMBSTONE_PREFIX + token)) !== null;
+}
+
+export async function save(kv: Kv, token: string, wl: Watchlist): Promise<boolean> {
+  // Check before and after the write. A delete that lands between the two removes the record again.
+  if (await isDeleted(kv, token)) return false;
   wl.changes = wl.changes.slice(-MAX_CHANGES);
   await kv.put(`wl:${token}`, JSON.stringify(wl), { expirationTtl: IDLE_TTL, metadata: { lastCheck: wl.lastCheck } });
+  if (await isDeleted(kv, token)) {
+    await kv.delete(`wl:${token}`);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -215,6 +304,8 @@ export async function rotate(kv: Kv, token: string): Promise<{ token: string; vi
 export async function remove(kv: Kv, token: string): Promise<boolean> {
   const wl = await load(kv, token);
   if (!wl) return false;
+  // Write the tombstone first, then delete the record, so a save from a running check cannot put it back.
+  await kv.put(TOMBSTONE_PREFIX + token, JSON.stringify({ deletedAt: new Date().toISOString() }), { expirationTtl: TOMBSTONE_TTL });
   await kv.delete(`wl:${token}`);
   if (wl.viewToken) await kv.delete(`vw:${wl.viewToken}`);
   await deleteAudit(kv, token);
