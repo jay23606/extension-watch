@@ -1,5 +1,6 @@
 {
   "name": "extension-watch",
+  "repository": {"type": "git", "url": "theluckystrike/extension-watch.git"},
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
