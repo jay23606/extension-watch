@@ -2,7 +2,7 @@
 
 <img src="docs/cover.jpg" alt="Extension Watch" width="800">
 
-Know what your team's Chrome extensions can do, and hear about it when that changes. Built by Michael Lip ([github.com/theluckystrike](https://github.com/theluckystrike)), who maintains 108 Chrome extensions with more than 150,000 users. Live at https://extension-watch.lipmichal.workers.dev
+Know what your team's Chrome extensions can do, and hear about it when that changes. Built by Michael Lip ([github.com/theluckystrike](https://github.com/theluckystrike)), whose Chrome extensions have 36,021 store users across 29 listings. Live at https://extension-watch.lipmichal.workers.dev
 
 ## The problem
 
