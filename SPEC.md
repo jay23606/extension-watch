@@ -9,8 +9,8 @@ staff use, what each one can do, and when that changes.
 Extension Watch: a team pastes the extension IDs its staff use (or the Chrome Web Store URLs, or a Chrome policy export).
 The service downloads each extension's current package from Google's public update service, reads its manifest, scores the
 risk with a transparent rule set, and keeps a snapshot. A daily check compares new versions with the last snapshot and raises
-an alert when an update adds permissions or site access. Built by Michael Lip, who maintains 108 Chrome extensions with
-more than 150,000 users.
+an alert when an update adds permissions or site access. Built by Michael Lip, whose Chrome extensions have 36,021 store
+users across 29 listings.
 
 Runtime: Cloudflare Workers + Workers KV (one record per watchlist, one shared record per extension per day) + a Cron Trigger every 10 minutes that re-checks lists due for their daily check. TypeScript ESM. No paid services. Node 24 toolchain.
 Tests never hit the network: fake fetch and fixture packages.
