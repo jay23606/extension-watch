@@ -26,6 +26,7 @@ const CHANGE_LABEL = {
   host_removed: "Host access removed",
   mv_changed: "Manifest version changed",
   new_extension: "New extension",
+  unreadable: "Package can no longer be read",
   removed_from_store: "Removed from store",
   content_script_added: "Runs on new sites",
   content_script_removed: "No longer runs on sites",

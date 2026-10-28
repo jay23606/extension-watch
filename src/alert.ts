@@ -8,6 +8,7 @@ const LABEL: Record<string, string> = {
   optional_added: "Can now request", externally_connectable_added: "Accepts messages from", csp_changed: "Script policy loosened",
   update_url_changed: "Updates from outside the store", score_jump: "Access grade rose", removed_from_store: "Removed from the store",
   mv_changed: "Manifest version changed", version_changed: "New version",
+  unreadable: "Package can no longer be read", new_extension: "New extension",
 };
 const RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 

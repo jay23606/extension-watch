@@ -32,6 +32,12 @@ test("alert text names the extension and caps at 10 lines", () => {
   assert.match(text, /and 2 more/);
 });
 
+test("unreadable alert text uses a readable label", () => {
+  const text = alertText("Design team", [ch("unreadable", "high")], { ["a".repeat(32)]: "Calc" }, "https://x/w/t");
+  assert.match(text, /HIGH: Calc: Package can no longer be read/);
+  assert.doesNotMatch(text, /unreadable/);
+});
+
 test("alerts are JSON with text and content, and redirects are not followed", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const real = globalThis.fetch;
