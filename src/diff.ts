@@ -29,8 +29,8 @@ export function diff(prev: Manifest | null, next: Manifest | null): Change[] {
   if (next === null) return [{ kind: "removed_from_store", value: prev.id, severity: "low" }];
 
   const changes: Change[] = [];
-  const push = (kind: string, value: string, severity: Severity) =>
-    changes.push({ kind: kind as Change["kind"], value, severity });
+  const push = (kind: Change["kind"], value: string, severity: Severity) =>
+    changes.push({ kind, value, severity });
 
   for (const p of added(new Set(prev.permissions), new Set(next.permissions))) push("permission_added", p, permissionSeverity(p, next));
   for (const p of removed(new Set(prev.permissions), new Set(next.permissions))) push("permission_removed", p, permissionSeverity(p, prev));

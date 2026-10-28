@@ -8,7 +8,8 @@ export type Severity = "critical" | "high" | "medium" | "low";
 export interface Finding { code: string; severity: Severity; title: string; detail: string; points: number }
 export interface Assessment { score: number; grade: "A" | "B" | "C" | "D" | "F"; findings: Finding[]; summary: string }
 export interface Change {
-  kind: "permission_added" | "permission_removed" | "host_added" | "host_removed" | "mv_changed" | "new_extension" | "removed_from_store";
+  kind: "permission_added" | "permission_removed" | "host_added" | "host_removed" | "mv_changed" | "new_extension" | "removed_from_store"
+    | "content_script_added" | "content_script_removed" | "optional_added" | "externally_connectable_added" | "csp_changed" | "update_url_changed" | "score_jump";
   value: string; severity: Severity;
 }
 export class FetchError extends Error {
